@@ -80,7 +80,6 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
       e.preventDefault();
 
       const rect = canvas.getBoundingClientRect();
-      // Apple Pencil なら touchType === 'stylus' が入るブラウザもある
       const touches = e.touches.length ? e.touches : e.changedTouches;
       if (!touches.length) return;
 
@@ -203,10 +202,6 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
   return (
     <div
       style={{
-        border: '1px solid #ccc',
-        borderRadius: 4,
-        padding: 4,
-        background: '#fff',
         touchAction: 'none',
         userSelect: 'none',
         WebkitUserSelect: 'none',
@@ -221,6 +216,9 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
           touchAction: 'none',
           userSelect: 'none',
           WebkitUserSelect: 'none',
+          background: '#fff', // 白い「書ける」エリアはここだけ
+          border: '1px solid #ccc',
+          borderRadius: 4,
         }}
       />
       <div style={{ textAlign: 'right', marginTop: 4 }}>

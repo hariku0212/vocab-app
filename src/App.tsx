@@ -71,25 +71,6 @@ function formatDateTime(iso?: string | null): string {
   return d.toLocaleString('ja-JP');
 }
 
-// 英語読み上げ
-function speakEnglish(text: string) {
-  if (typeof window === 'undefined') return;
-  const synth = window.speechSynthesis;
-  if (!synth) {
-    alert('このブラウザは音声読み上げに対応していません');
-    return;
-  }
-  if (!text) return;
-
-  synth.cancel();
-
-  const utter = new SpeechSynthesisUtterance(text);
-  utter.lang = 'en-US';
-  utter.rate = 0.9;
-  utter.pitch = 1.0;
-  synth.speak(utter);
-}
-
 // 型定義
 type WordItem = {
   id: number;
@@ -126,6 +107,7 @@ type Direction = 'en_to_jp' | 'jp_to_en';
 type Mode = 'index' | 'level';
 type InputMode = 'text' | 'handwriting';
 type ViewMode = 'test' | 'flash';
+type ShowExamplesMode = 'auto' | 'always' | 'never';
 
 type WrongItemStat = {
   user_id: string;
@@ -177,7 +159,18 @@ type SessionConfig = {
   endIndex: number;
   level: LevelFilter;
   direction: Direction;
+  shuffle: boolean;
+  showExamples: ShowExamplesMode;
 };
+
+function shuffleArray<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
 function App() {
   const [userId, setUserId] = useState<string | null>(null);
@@ -192,6 +185,8 @@ function App() {
     endIndex: 1000,
     level: 'all',
     direction: 'en_to_jp',
+    shuffle: true,
+    showExamples: 'auto',
   });
 
   const [inputMode, setInputMode] = useState<InputMode>('text');
@@ -224,6 +219,10 @@ function App() {
 
   const [displayNameEdit, setDisplayNameEdit] = useState<string>('');
   const [message, setMessage] = useState<string | null>(null);
+
+  const [englishVoice, setEnglishVoice] = useState<SpeechSynthesisVoice | null>(
+    null
+  );
 
   /***************
    * Google ログイン
@@ -304,7 +303,7 @@ function App() {
   }, []);
 
   /***************
-   * 単語データ読み込み（BASE_URL 対応版）
+   * 単語データ読み込み（BASE_URL 対応）
    ***************/
   useEffect(() => {
     const load = async () => {
@@ -317,22 +316,6 @@ function App() {
         }
         const data: WordsData = await res.json();
         setWordsData(data);
-        // デバッグ用（core デッキ前提）
-        const core = data.decks['core'];
-        if (core) {
-          const present = new Set<number>();
-          core.items.forEach((item) => {
-            if (typeof item.bookIndex === 'number') {
-              present.add(item.bookIndex);
-            }
-          });
-          const missing: number[] = [];
-          for (let i = 1; i <= 1000; i++) {
-            if (!present.has(i)) missing.push(i);
-          }
-          console.log('Missing bookIndex in 1〜1000:', missing);
-        }
-
       } catch (e) {
         console.error(e);
         setMessage('単語データの読み込みに失敗しました');
@@ -340,6 +323,68 @@ function App() {
     };
     load();
   }, []);
+
+  /***************
+   * 音声読み上げ用の英語 voice 選択
+   ***************/
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    const synth = window.speechSynthesis;
+
+    const pickVoice = () => {
+      const voices = synth.getVoices();
+      if (!voices || voices.length === 0) return;
+
+      const langLower = (v: SpeechSynthesisVoice) =>
+        (v.lang || '').toLowerCase();
+      const enVoices = voices.filter((v) =>
+        langLower(v).startsWith('en')
+      );
+
+      const preferredNames = ['Samantha', 'Karen', 'Daniel', 'Alex', 'Fred'];
+      let chosen: SpeechSynthesisVoice | null = null;
+
+      for (const name of preferredNames) {
+        const found = enVoices.find((v) => v.name.includes(name));
+        if (found) {
+          chosen = found;
+          break;
+        }
+      }
+
+      if (!chosen) chosen = enVoices[0] || voices[0];
+      setEnglishVoice(chosen);
+    };
+
+    pickVoice();
+    synth.addEventListener('voiceschanged', pickVoice);
+    return () => {
+      synth.removeEventListener('voiceschanged', pickVoice);
+    };
+  }, []);
+
+  const speakEnglish = (text: string) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    const synth = window.speechSynthesis;
+    if (!synth) {
+      alert('このブラウザは音声読み上げに対応していません');
+      return;
+    }
+    if (!text) return;
+
+    synth.cancel();
+
+    const utter = new SpeechSynthesisUtterance(text);
+    if (englishVoice) {
+      utter.voice = englishVoice;
+      utter.lang = englishVoice.lang;
+    } else {
+      utter.lang = 'en-US';
+    }
+    utter.rate = 0.9;
+    utter.pitch = 1.0;
+    synth.speak(utter);
+  };
 
   /***************
    * デバッグログイン
@@ -411,6 +456,10 @@ function App() {
       );
     }
 
+    if (sessionConfig.shuffle) {
+      filtered = shuffleArray(filtered);
+    }
+
     setSessionItems(filtered);
     setSessionBookId(wordsData.bookId);
     setSessionDeckId(sessionConfig.deckId);
@@ -460,7 +509,7 @@ function App() {
       const mapById = new Map<number, WordItem>();
       deck.items.forEach((w) => mapById.set(w.id, w));
 
-      const wordList: WordItem[] = [];
+      let wordList: WordItem[] = [];
       res.items.forEach((stat) => {
         const item = mapById.get(stat.item_id);
         if (item) wordList.push(item);
@@ -470,6 +519,10 @@ function App() {
         setMessage('不正解がある単語がまだありません');
         setSessionItems([]);
         return;
+      }
+
+      if (sessionConfig.shuffle) {
+        wordList = shuffleArray(wordList);
       }
 
       setSessionItems(wordList);
@@ -498,6 +551,13 @@ function App() {
   const endIndex = Math.min(startIndex + pageSize, sessionItems.length);
   const pageItems = sessionItems.slice(startIndex, endIndex);
   const isEnToJp = sessionConfig.direction === 'en_to_jp';
+
+  const shouldShowExampleInQuestion = (word: WordItem): boolean => {
+    if (sessionConfig.showExamples === 'never') return false;
+    if (sessionConfig.showExamples === 'always') return true;
+    // auto: 多義語のみ
+    return !!word.poly;
+  };
 
   /***************
    * 解答表示（デフォルトで○）
@@ -942,6 +1002,39 @@ function App() {
               <option value="flash">単語カード</option>
             </select>
           </label>
+
+          <label>
+            出題順：
+            <select
+              value={sessionConfig.shuffle ? 'random' : 'sequential'}
+              onChange={(e) =>
+                setSessionConfig((prev) => ({
+                  ...prev,
+                  shuffle: e.target.value === 'random',
+                }))
+              }
+            >
+              <option value="sequential">昇順</option>
+              <option value="random">ランダム</option>
+            </select>
+          </label>
+
+          <label>
+            例文の表示：
+            <select
+              value={sessionConfig.showExamples}
+              onChange={(e) =>
+                setSessionConfig((prev) => ({
+                  ...prev,
+                  showExamples: e.target.value as ShowExamplesMode,
+                }))
+              }
+            >
+              <option value="auto">多義語のみ</option>
+              <option value="always">常に表示</option>
+              <option value="never">表示しない</option>
+            </select>
+          </label>
         </div>
 
         <div style={{ marginTop: '0.75rem' }}>
@@ -1028,9 +1121,13 @@ function App() {
                     </button>
                   )}
                 </div>
-                <div style={{ fontStyle: 'italic', color: '#555' }}>
-                  例文: {isEnToJp ? word.example_en : word.example_jp}
-                </div>
+
+                {shouldShowExampleInQuestion(word) && (
+                  <div style={{ fontStyle: 'italic', color: '#555' }}>
+                    例文:{' '}
+                    {isEnToJp ? word.example_en : word.example_jp}
+                  </div>
+                )}
 
                 <div style={{ marginTop: '0.25rem' }}>
                   {inputMode === 'text' ? (
