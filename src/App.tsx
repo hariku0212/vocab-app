@@ -317,6 +317,22 @@ function App() {
         }
         const data: WordsData = await res.json();
         setWordsData(data);
+        // デバッグ用（core デッキ前提）
+        const core = data.decks['core'];
+        if (core) {
+          const present = new Set<number>();
+          core.items.forEach((item) => {
+            if (typeof item.bookIndex === 'number') {
+              present.add(item.bookIndex);
+            }
+          });
+          const missing: number[] = [];
+          for (let i = 1; i <= 1000; i++) {
+            if (!present.has(i)) missing.push(i);
+          }
+          console.log('Missing bookIndex in 1〜1000:', missing);
+        }
+
       } catch (e) {
         console.error(e);
         setMessage('単語データの読み込みに失敗しました');
