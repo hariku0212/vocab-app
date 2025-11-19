@@ -304,12 +304,17 @@ function App() {
   }, []);
 
   /***************
-   * 単語データ読み込み
+   * 単語データ読み込み（BASE_URL 対応版）
    ***************/
   useEffect(() => {
     const load = async () => {
       try {
-        const res = await fetch('/words_gold.json');
+        const url = `${import.meta.env.BASE_URL}words_gold.json`;
+        console.log('Loading words from:', url);
+        const res = await fetch(url);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status} for ${url}`);
+        }
         const data: WordsData = await res.json();
         setWordsData(data);
       } catch (e) {
