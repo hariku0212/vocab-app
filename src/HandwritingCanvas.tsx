@@ -1,120 +1,100 @@
-import { useEffect, useRef } from 'react';
+import React, { useRef, useState } from 'react';
 
 type HandwritingCanvasProps = {
-  height?: number;   // 表示高さ（px）
-  lineWidth?: number; // 線の太さ
+  height?: number;
 };
 
-type Point = { x: number; y: number };
-
-export default function HandwritingCanvas({
-  height = 140,
-  lineWidth = 2.4,
-}: HandwritingCanvasProps) {
+const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
+  height = 160,
+}) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const drawingRef = useRef(false);
-  const lastPointRef = useRef<Point | null>(null);
-  const dprRef = useRef(1);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const lastPointRef = useRef<{ x: number; y: number } | null>(null);
 
-  // Canvas 初期化（高解像度対応 + 線設定）
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    dprRef.current = dpr;
-
-    const rect = canvas.getBoundingClientRect();
-    // 見た目サイズ × DPR で内部解像度を確保
-    const width = rect.width || 400;
-    const h = rect.height || height;
-
-    canvas.width = width * dpr;
-    canvas.height = h * dpr;
-
-    ctx.setTransform(1, 0, 0, 1, 0, 0); // スケールをリセット
-    ctx.scale(dpr, dpr); // 描画は CSS ピクセルで行う
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = lineWidth;
-    ctx.strokeStyle = '#000000';
-  }, [height, lineWidth]);
-
-  const getCanvasPoint = (
-    e: React.PointerEvent<HTMLCanvasElement>
-  ): Point | null => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const rect = canvas.getBoundingClientRect();
+  // キャンバス内の座標に変換
+  const getPos = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
     return {
       x: e.clientX - rect.left,
       y: e.clientY - rect.top,
     };
   };
 
+  const setupContext = (canvas: HTMLCanvasElement): CanvasRenderingContext2D | null => {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    // 線のスタイル
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#000';
+    return ctx;
+  };
+
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    // マウスの場合は左クリックのみ許可
+    if (e.pointerType === 'mouse' && e.buttons !== 1) return;
+
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+
+    e.preventDefault();
+
+    const ctx = setupContext(canvas);
     if (!ctx) return;
 
-    const p = getCanvasPoint(e);
-    if (!p) return;
+    // このポインタをキャンバスにキャプチャ
+    canvas.setPointerCapture(e.pointerId);
 
-    drawingRef.current = true;
-    lastPointRef.current = p;
-
+    const { x, y } = getPos(e);
     ctx.beginPath();
-    ctx.moveTo(p.x, p.y);
-
-    (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
-    e.preventDefault();
+    ctx.moveTo(x, y);
+    lastPointRef.current = { x, y };
+    setIsDrawing(true);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!drawingRef.current) return;
+    if (!isDrawing) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+
+    e.preventDefault();
+
+    const ctx = setupContext(canvas);
     if (!ctx) return;
 
-    const p = getCanvasPoint(e);
+    const { x, y } = getPos(e);
     const last = lastPointRef.current;
-    if (!p || !last) return;
 
-    // 前回点と今回点の中点を取って、Quadratic Curve でつなぐ → ちょっとなめらか
-    const midX = (last.x + p.x) / 2;
-    const midY = (last.y + p.y) / 2;
+    if (!last) {
+      ctx.lineTo(x, y);
+      ctx.stroke();
+      lastPointRef.current = { x, y };
+      return;
+    }
 
-    ctx.quadraticCurveTo(last.x, last.y, midX, midY);
+    ctx.beginPath();
+    ctx.moveTo(last.x, last.y);
+    ctx.lineTo(x, y);
     ctx.stroke();
 
-    lastPointRef.current = p;
-    e.preventDefault();
+    lastPointRef.current = { x, y };
   };
 
-  const finishStroke = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!drawingRef.current) return;
-    drawingRef.current = false;
-    lastPointRef.current = null;
-    try {
-      (e.target as HTMLCanvasElement).releasePointerCapture(e.pointerId);
-    } catch {
-      // ignore
+  const stopDrawing = (e?: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!isDrawing) return;
+    const canvas = canvasRef.current;
+    if (canvas && e) {
+      try {
+        canvas.releasePointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
     }
-    e.preventDefault();
-  };
-
-  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    finishStroke(e);
-  };
-
-  const handlePointerLeave = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    finishStroke(e);
+    setIsDrawing(false);
+    lastPointRef.current = null;
   };
 
   const handleClear = () => {
@@ -122,43 +102,51 @@ export default function HandwritingCanvas({
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-
-    const dpr = dprRef.current || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.scale(dpr, dpr);
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = lineWidth;
-    ctx.strokeStyle = '#000000';
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
   };
 
+  // Retina 対応などをきっちりやるなら useEffect で DPR を考慮しますが、
+  // ひとまずシンプルに width=800 を 100% 表示にしています。
+  const canvasHeight = height;
+
   return (
-    <div>
+    <div
+      style={{
+        border: '1px solid #ccc',
+        borderRadius: 4,
+        padding: 4,
+        background: '#fff',
+        touchAction: 'none', // ← スクロールなどのジェスチャー無効
+        userSelect: 'none',  // ← テキスト選択無効
+      }}
+    >
       <canvas
         ref={canvasRef}
+        width={800}
+        height={canvasHeight}
         style={{
           width: '100%',
-          height: `${height}px`,
-          border: '1px solid #ddd',
-          borderRadius: 4,
-          backgroundColor: '#fff',
-          touchAction: 'none', // これが iPad / iPhone で超重要（スクロール抑止）
+          display: 'block',
+          touchAction: 'none', // iPad での描画に重要
+          userSelect: 'none',
         }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerLeave}
+        onPointerUp={stopDrawing}
+        onPointerCancel={stopDrawing}
+        onPointerLeave={stopDrawing}
       />
-      <button
-        type="button"
-        onClick={handleClear}
-        style={{ marginTop: '0.25rem', fontSize: '0.85rem' }}
-      >
-        クリア
-      </button>
+      <div style={{ textAlign: 'right', marginTop: 4 }}>
+        <button
+          type="button"
+          onClick={handleClear}
+          style={{ fontSize: '0.8rem' }}
+        >
+          クリア
+        </button>
+      </div>
     </div>
   );
-}
+};
+
+export default HandwritingCanvas;
