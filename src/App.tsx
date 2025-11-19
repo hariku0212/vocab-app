@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import type { CSSProperties } from 'react';
 import HandwritingCanvas from './HandwritingCanvas';
 
@@ -110,6 +110,7 @@ type Mode = 'index' | 'level';
 type InputMode = 'text' | 'handwriting';
 type ViewMode = 'test' | 'flash';
 type ShowExamplesMode = 'auto' | 'always' | 'never';
+type TargetMode = 'all' | 'wrong';
 
 type WrongItemStat = {
   user_id: string;
@@ -151,6 +152,7 @@ type SessionConfig = {
   direction: Direction;
   shuffle: boolean;
   showExamples: ShowExamplesMode;
+  target: TargetMode; // すべて or 間違えた単語のみ
 };
 
 type ViewportKind = 'mobile' | 'tablet' | 'desktop';
@@ -175,6 +177,7 @@ function App() {
     direction: 'en_to_jp',
     shuffle: true,
     showExamples: 'auto',
+    target: 'all',
   });
 
   const [inputMode, setInputMode] = useState<InputMode>('text');
@@ -183,8 +186,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showMyPage, setShowMyPage] = useState(false);
 
-  const [viewportKind, setViewportKind] =
-    useState<ViewportKind>('desktop');
+  const [viewportKind, setViewportKind] = useState<ViewportKind>('desktop');
 
   // ---- 出題セッション ----
   const [sessionBookId, setSessionBookId] = useState<string | null>(null);
@@ -194,41 +196,36 @@ function App() {
   const [pageSize, setPageSize] = useState<number>(15);
 
   const [answers, setAnswers] = useState<Record<number, string>>({});
-  const [marks, setMarks] = useState<
-    Record<number, 'correct' | 'wrong'>
-  >({});
+  const [marks, setMarks] = useState<Record<number, 'correct' | 'wrong'>>({});
   const [showAnswers, setShowAnswers] = useState<boolean>(false);
   const [isSavingPage, setIsSavingPage] = useState<boolean>(false);
 
   // ---- 単語カード ----
   const [cardIndex, setCardIndex] = useState<number>(0);
-  const [showCardAnswer, setShowCardAnswer] =
-    useState<boolean>(false);
+  const [showCardAnswer, setShowCardAnswer] = useState<boolean>(false);
 
   // ---- マイページ ----
-  const [userOverview, setUserOverview] =
-    useState<UserOverview | null>(null);
-  const [isLoadingOverview, setIsLoadingOverview] =
-    useState<boolean>(false);
-  const [myPageWrongItems, setMyPageWrongItems] = useState<
-    WrongItemStat[] | null
-  >(null);
-  const [isLoadingMyPageWrong, setIsLoadingMyPageWrong] =
-    useState<boolean>(false);
+  const [userOverview, setUserOverview] = useState<UserOverview | null>(null);
+  const [isLoadingOverview, setIsLoadingOverview] = useState<boolean>(false);
+  const [myPageWrongItems, setMyPageWrongItems] = useState<WrongItemStat[] | null>(null);
+  const [isLoadingMyPageWrong, setIsLoadingMyPageWrong] = useState<boolean>(false);
   const [displayNameEdit, setDisplayNameEdit] = useState<string>('');
 
   // ---- メッセージ / 音声 ----
   const [message, setMessage] = useState<string | null>(null);
-  const [englishVoice, setEnglishVoice] =
-    useState<SpeechSynthesisVoice | null>(null);
+  const [englishVoice, setEnglishVoice] = useState<SpeechSynthesisVoice | null>(null);
+  const [japaneseVoice, setJapaneseVoice] = useState<SpeechSynthesisVoice | null>(null);
 
   // ---- ドライブモード ----
   const [driveMode, setDriveMode] = useState<boolean>(false);
   const [driveRunning, setDriveRunning] = useState<boolean>(false);
   const [driveIndex, setDriveIndex] = useState<number>(0);
-  const [driveStage, setDriveStage] =
-    useState<DriveStage>('word_en');
+  const [driveStage, setDriveStage] = useState<DriveStage>('word_en');
   const [driveInterval, setDriveInterval] = useState<number>(2500);
+
+  // ---- その他 ----
+  const [viewportKindStateSet] = useState<boolean>(false); // 未使用だが将来用に残す
+  const testTopRef = useRef<HTMLDivElement | null>(null);
 
   // ---- レイアウト用スタイル ----
   const accent = '#2563eb';
@@ -259,6 +256,14 @@ function App() {
           background: '#ffffff',
           boxShadow: '0 18px 45px rgba(15,23,42,0.35)',
         };
+
+  const getDeckLabel = (deckId: string): string => {
+    if (!wordsData) return deckId;
+    const deck = wordsData.decks[deckId];
+    if (!deck) return deckId;
+    if (deck.id === 'core') return '本編';
+    return deck.labelJa || deck.id;
+  };
 
   // ===== エフェクト類 =====
 
@@ -312,40 +317,49 @@ function App() {
     load();
   }, []);
 
-  // 英語 voice 選択
+  // 英語 / 日本語 voice 選択
   useEffect(() => {
     if (typeof window === 'undefined' || !window.speechSynthesis) return;
     const synth = window.speechSynthesis;
 
-    const pickVoice = () => {
+    const pickVoices = () => {
       const voices = synth.getVoices();
       if (!voices || voices.length === 0) return;
 
-      const langLower = (v: SpeechSynthesisVoice) =>
-        (v.lang || '').toLowerCase();
-      const enVoices = voices.filter((v) =>
-        langLower(v).startsWith('en')
-      );
+      const langLower = (v: SpeechSynthesisVoice) => (v.lang || '').toLowerCase();
+      const enVoices = voices.filter((v) => langLower(v).startsWith('en'));
+      const jaVoices = voices.filter((v) => langLower(v).startsWith('ja'));
 
-      const preferredNames = ['Samantha', 'Karen', 'Daniel', 'Alex', 'Fred'];
-      let chosen: SpeechSynthesisVoice | null = null;
-
-      for (const name of preferredNames) {
+      const enPreferred = ['Samantha', 'Karen', 'Daniel', 'Alex', 'Fred'];
+      let chosenEn: SpeechSynthesisVoice | null = null;
+      for (const name of enPreferred) {
         const found = enVoices.find((v) => v.name.includes(name));
         if (found) {
-          chosen = found;
+          chosenEn = found;
           break;
         }
       }
+      if (!chosenEn) chosenEn = enVoices[0] || voices[0] || null;
 
-      if (!chosen) chosen = enVoices[0] || voices[0];
-      setEnglishVoice(chosen);
+      const jaPreferred = ['Kyoko', 'Otoya', 'Mizuki', 'Takumi', 'Ichiro'];
+      let chosenJa: SpeechSynthesisVoice | null = null;
+      for (const name of jaPreferred) {
+        const found = jaVoices.find((v) => v.name.includes(name));
+        if (found) {
+          chosenJa = found;
+          break;
+        }
+      }
+      if (!chosenJa) chosenJa = jaVoices[0] || null;
+
+      setEnglishVoice(chosenEn);
+      setJapaneseVoice(chosenJa);
     };
 
-    pickVoice();
-    synth.addEventListener('voiceschanged', pickVoice);
+    pickVoices();
+    synth.addEventListener('voiceschanged', pickVoices);
     return () => {
-      synth.removeEventListener('voiceschanged', pickVoice);
+      synth.removeEventListener('voiceschanged', pickVoices);
     };
   }, []);
 
@@ -384,7 +398,7 @@ function App() {
     setShowCardAnswer(false);
   }, [viewMode, sessionItems]);
 
-  // ドライブモード制御
+  // ドライブモード制御（自動進行＋読み上げ）
   useEffect(() => {
     if (
       !driveMode ||
@@ -419,7 +433,12 @@ function App() {
       const synth = window.speechSynthesis;
       synth.cancel();
       const utter = new SpeechSynthesisUtterance(text);
-      utter.lang = 'ja-JP';
+      if (japaneseVoice) {
+        utter.voice = japaneseVoice;
+        utter.lang = japaneseVoice.lang;
+      } else {
+        utter.lang = 'ja-JP';
+      }
       synth.speak(utter);
     };
 
@@ -435,8 +454,7 @@ function App() {
     }
 
     const timer = setTimeout(() => {
-      if (!driveMode || !driveRunning || sessionItems.length === 0)
-        return;
+      if (!driveMode || !driveRunning || sessionItems.length === 0) return;
 
       setDriveStage((prevStage) => {
         const hasExample = !!current.example_en;
@@ -464,6 +482,7 @@ function App() {
     driveInterval,
     sessionItems,
     englishVoice,
+    japaneseVoice,
   ]);
 
   // ===== 音声系関数 =====
@@ -495,7 +514,12 @@ function App() {
 
     synth.cancel();
     const utter = new SpeechSynthesisUtterance(text);
-    utter.lang = 'ja-JP';
+    if (japaneseVoice) {
+      utter.voice = japaneseVoice;
+      utter.lang = japaneseVoice.lang;
+    } else {
+      utter.lang = 'ja-JP';
+    }
     synth.speak(utter);
   };
 
@@ -609,7 +633,9 @@ function App() {
       });
 
       setMessage(
-        `番号指定モード: ${deck.labelJa} / 範囲 ${start}〜${end} / 想定: ${expectedCount}（実際: ${filtered.length} 問）`
+        `番号指定モード: ${getDeckLabel(
+          sessionConfig.deckId
+        )} / 範囲 ${start}〜${end} / 想定: ${expectedCount}（実際: ${filtered.length} 問）`
       );
     } else {
       filtered = deck.items.filter((item) => {
@@ -618,11 +644,11 @@ function App() {
       });
 
       const levelLabel =
-        sessionConfig.level === 'all'
-          ? '全レベル'
-          : `レベル ${sessionConfig.level}`;
+        sessionConfig.level === 'all' ? '全レベル' : `レベル ${sessionConfig.level}`;
       setMessage(
-        `レベル別モード: ${deck.labelJa} / ${levelLabel} / 問題数: ${filtered.length}`
+        `レベル別モード: ${getDeckLabel(sessionConfig.deckId)} / ${levelLabel} / 問題数: ${
+          filtered.length
+        }`
       );
     }
 
@@ -721,6 +747,30 @@ function App() {
     }
   };
 
+  const handleStartTest = () => {
+    if (sessionConfig.target === 'wrong') {
+      handleStartWrongSession();
+    } else {
+      handleStartSession();
+    }
+  };
+
+  const handleResetSession = () => {
+    setSessionItems([]);
+    setSessionBookId(null);
+    setSessionDeckId(null);
+    setCurrentPage(0);
+    setAnswers({});
+    setMarks({});
+    setShowAnswers(false);
+    setCardIndex(0);
+    setShowCardAnswer(false);
+    setDriveMode(false);
+    setDriveRunning(false);
+    setDriveIndex(0);
+    setDriveStage('word_en');
+  };
+
   // ページング
   const totalPages =
     sessionItems.length > 0 ? Math.ceil(sessionItems.length / pageSize) : 0;
@@ -747,6 +797,12 @@ function App() {
       });
       return updated;
     });
+
+    if (testTopRef.current) {
+      testTopRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
   };
 
   const handleSaveCurrentPage = async () => {
@@ -856,9 +912,7 @@ function App() {
       });
 
       if (wrongRes.ok && wrongRes.items) {
-        const items = [...wrongRes.items].filter(
-          (i) => i.wrong_total > 0
-        );
+        const items = [...wrongRes.items].filter((i) => i.wrong_total > 0);
         items.sort((a, b) => {
           if (b.wrong_total !== a.wrong_total) {
             return b.wrong_total - a.wrong_total;
@@ -908,9 +962,7 @@ function App() {
       });
 
       setDisplayName(newName);
-      setUserOverview((prev) =>
-        prev ? { ...prev, display_name: newName } : prev
-      );
+      setUserOverview((prev) => (prev ? { ...prev, display_name: newName } : prev));
       setMessage('表示名を更新しました');
     } catch (e) {
       console.error(e);
@@ -954,7 +1006,7 @@ function App() {
                 color: '#4b5563',
               }}
             >
-              TOEIC など複数の英単語帳に対応した、テスト特化の単語トレーニングアプリ
+              複数の英単語帳を PC / iPad でサクサク復習できる、テスト特化型アプリ
             </p>
           </header>
 
@@ -990,8 +1042,7 @@ function App() {
                 padding: '1.25rem 1.2rem',
                 borderRadius: 16,
                 border: '1px solid #e5e7eb',
-                background:
-                  'linear-gradient(135deg, #eff6ff, #ffffff)',
+                background: 'linear-gradient(135deg, #eff6ff, #ffffff)',
               }}
             >
               <h2
@@ -1014,10 +1065,7 @@ function App() {
                 Google アカウントでログインすると、学習履歴・苦手単語・ランキングを
                 自動で記録できます。
               </p>
-              <div
-                id="googleSignInDiv"
-                style={{ marginBottom: '0.75rem' }}
-              />
+              <div id="googleSignInDiv" style={{ marginBottom: '0.75rem' }} />
               <button
                 type="button"
                 onClick={handleDebugLogin}
@@ -1154,8 +1202,7 @@ function App() {
                   width: 26,
                   height: 26,
                   borderRadius: '50%',
-                  background:
-                    'linear-gradient(135deg, #1d4ed8, #4f46e5)',
+                  background: 'linear-gradient(135deg, #1d4ed8, #4f46e5)',
                   color: '#f9fafb',
                   display: 'flex',
                   alignItems: 'center',
@@ -1165,33 +1212,20 @@ function App() {
                   flexShrink: 0,
                 }}
               >
-                {(displayName ?? userId).charAt(0).toUpperCase()}
+                {(displayName ?? userId ?? '?').charAt(0).toUpperCase()}
               </div>
               <span
                 style={{
                   fontSize: '0.85rem',
                   color: '#1e3a8a',
-                  maxWidth: 120,
+                  maxWidth: 140,
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
                 }}
-                title={displayName ?? userId}
+                title={displayName ?? userId ?? ''}
               >
                 {displayName ?? userId}
-              </span>
-              <span
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowMyPage(true);
-                }}
-                style={{
-                  fontSize: '0.85rem',
-                  color: '#1d4ed8',
-                }}
-                title="表示名を編集"
-              >
-                ✏️
               </span>
             </button>
 
@@ -1255,8 +1289,7 @@ function App() {
               cursor: 'pointer',
               fontSize: '0.85rem',
               fontWeight: viewMode === 'test' ? 600 : 400,
-              background:
-                viewMode === 'test' ? accent : 'transparent',
+              background: viewMode === 'test' ? accent : 'transparent',
               color: viewMode === 'test' ? '#ffffff' : '#374151',
             }}
           >
@@ -1272,8 +1305,7 @@ function App() {
               cursor: 'pointer',
               fontSize: '0.85rem',
               fontWeight: viewMode === 'flash' ? 600 : 400,
-              background:
-                viewMode === 'flash' ? accent : 'transparent',
+              background: viewMode === 'flash' ? accent : 'transparent',
               color: viewMode === 'flash' ? '#ffffff' : '#374151',
             }}
           >
@@ -1283,341 +1315,413 @@ function App() {
 
         {/* メイン部分 */}
         <main>
-          {/* 出題設定共通ブロック */}
-          <section
-            style={{
-              marginBottom: '1.5rem',
-              padding: '1rem',
-              border: '1px solid #e5e7eb',
-              borderRadius: 16,
-              background: '#f9fafb',
-            }}
-          >
-            <h2
+          {/* 出題設定（セッション開始前のみ表示） */}
+          {sessionItems.length === 0 && (
+            <section
               style={{
-                fontSize: '1.05rem',
-                marginTop: 0,
-                marginBottom: '0.5rem',
+                marginBottom: '1.5rem',
+                padding: '1rem',
+                border: '1px solid #e5e7eb',
+                borderRadius: 16,
+                background: '#f9fafb',
               }}
             >
-              🎯 出題設定
-            </h2>
+              <h2
+                style={{
+                  fontSize: '1.05rem',
+                  marginTop: 0,
+                  marginBottom: '0.4rem',
+                }}
+              >
+                🎯 出題設定
+              </h2>
+              <p
+                style={{
+                  margin: '0 0 0.7rem',
+                  fontSize: '0.85rem',
+                  color: '#6b7280',
+                }}
+              >
+                ここで設定した範囲は、テストと単語カードの両方に共通して使われます。
+              </p>
 
-            {/* 上段：モード・入力・帳票 */}
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                gap: '0.5rem',
-                marginBottom: '0.75rem',
-              }}
-            >
               <div
                 style={{
-                  display: 'inline-flex',
-                  borderRadius: 999,
-                  border: '1px solid #e5e7eb',
-                  overflow: 'hidden',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '0.6rem',
+                  fontSize: '0.9rem',
                 }}
               >
-                <button
-                  type="button"
-                  onClick={() =>
-                    setSessionConfig((prev) => ({
-                      ...prev,
-                      mode: 'index',
-                    }))
-                  }
-                  style={{
-                    padding: '0.25rem 0.7rem',
-                    border: 'none',
-                    background:
-                      sessionConfig.mode === 'index'
-                        ? '#ffffff'
-                        : 'transparent',
-                    fontSize: '0.85rem',
-                    cursor: 'pointer',
-                  }}
-                >
-                  🔢 番号指定
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setSessionConfig((prev) => ({
-                      ...prev,
-                      mode: 'level',
-                    }))
-                  }
-                  style={{
-                    padding: '0.25rem 0.7rem',
-                    border: 'none',
-                    background:
-                      sessionConfig.mode === 'level'
-                        ? '#ffffff'
-                        : 'transparent',
-                    fontSize: '0.85rem',
-                    cursor: 'pointer',
-                  }}
-                >
-                  📊 レベル別
-                </button>
+                {/* 出題対象 */}
+                <div>
+                  <div style={{ marginBottom: '0.2rem' }}>出題対象：</div>
+                  <label>
+                    <select
+                      value={sessionConfig.target}
+                      onChange={(e) =>
+                        setSessionConfig((prev) => ({
+                          ...prev,
+                          target: e.target.value as TargetMode,
+                        }))
+                      }
+                    >
+                      <option value="all">すべての単語</option>
+                      <option value="wrong">間違えた単語のみ</option>
+                    </select>
+                  </label>
+                </div>
+
+                {/* 単語帳 / デッキ */}
+                <div>
+                  <div style={{ marginBottom: '0.2rem' }}>単語帳・デッキ：</div>
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '0.75rem',
+                      alignItems: 'center',
+                    }}
+                  >
+                    {wordsData && (
+                      <label>
+                        単語帳：
+                        <select
+                          value={wordsData.bookId}
+                          onChange={() => {}}
+                          disabled
+                          style={{ marginLeft: '0.25rem' }}
+                        >
+                          <option value={wordsData.bookId}>
+                            {wordsData.bookName}
+                          </option>
+                        </select>
+                      </label>
+                    )}
+                    <label>
+                      デッキ：
+                      <select
+                        value={sessionConfig.deckId}
+                        onChange={(e) =>
+                          setSessionConfig((prev) => ({
+                            ...prev,
+                            deckId: e.target.value,
+                          }))
+                        }
+                        style={{ marginLeft: '0.25rem' }}
+                      >
+                        {wordsData ? (
+                          Object.values(wordsData.decks).map((deck) => (
+                            <option key={deck.id} value={deck.id}>
+                              {getDeckLabel(deck.id)}
+                            </option>
+                          ))
+                        ) : (
+                          <option value="core">本編</option>
+                        )}
+                      </select>
+                    </label>
+                  </div>
+                </div>
+
+                {/* モード＋範囲・レベル */}
+                <div>
+                  <div style={{ marginBottom: '0.2rem' }}>出題モード：</div>
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '0.75rem',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <label>
+                      <input
+                        type="radio"
+                        name="mode"
+                        value="index"
+                        checked={sessionConfig.mode === 'index'}
+                        onChange={() =>
+                          setSessionConfig((prev) => ({ ...prev, mode: 'index' }))
+                        }
+                      />{' '}
+                      番号指定
+                    </label>
+                    <label>
+                      <input
+                        type="radio"
+                        name="mode"
+                        value="level"
+                        checked={sessionConfig.mode === 'level'}
+                        onChange={() =>
+                          setSessionConfig((prev) => ({ ...prev, mode: 'level' }))
+                        }
+                      />{' '}
+                      レベル別
+                    </label>
+                  </div>
+
+                  {sessionConfig.mode === 'index' && (
+                    <div
+                      style={{
+                        marginTop: '0.4rem',
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: '0.5rem',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <label>
+                        範囲 from:
+                        <input
+                          type="number"
+                          min={1}
+                          value={sessionConfig.startIndex}
+                          onChange={(e) =>
+                            setSessionConfig((prev) => ({
+                              ...prev,
+                              startIndex: Number(e.target.value || 1),
+                            }))
+                          }
+                          style={{
+                            width: '4.5rem',
+                            marginLeft: '0.25rem',
+                          }}
+                        />
+                      </label>
+                      <label>
+                        to:
+                        <input
+                          type="number"
+                          min={1}
+                          value={sessionConfig.endIndex}
+                          onChange={(e) =>
+                            setSessionConfig((prev) => ({
+                              ...prev,
+                              endIndex: Number(
+                                e.target.value || prev.startIndex || 1
+                              ),
+                            }))
+                          }
+                          style={{
+                            width: '4.5rem',
+                            marginLeft: '0.25rem',
+                          }}
+                        />
+                      </label>
+                    </div>
+                  )}
+
+                  {sessionConfig.mode === 'level' && (
+                    <div
+                      style={{
+                        marginTop: '0.4rem',
+                      }}
+                    >
+                      <label>
+                        レベル：
+                        <select
+                          value={sessionConfig.level}
+                          onChange={(e) =>
+                            setSessionConfig((prev) => ({
+                              ...prev,
+                              level: e.target.value as LevelFilter,
+                            }))
+                          }
+                          style={{ marginLeft: '0.25rem' }}
+                        >
+                          <option value="all">全レベル</option>
+                          <option value="600">600</option>
+                          <option value="730">730</option>
+                          <option value="860">860</option>
+                          <option value="990">990</option>
+                        </select>
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                {/* 出題方向 */}
+                <div>
+                  <div style={{ marginBottom: '0.2rem' }}>出題方向：</div>
+                  <label>
+                    <select
+                      value={sessionConfig.direction}
+                      onChange={(e) =>
+                        setSessionConfig((prev) => ({
+                          ...prev,
+                          direction: e.target.value as Direction,
+                        }))
+                      }
+                    >
+                      <option value="en_to_jp">英 → 日（意味）</option>
+                      <option value="jp_to_en">日 → 英（スペル）</option>
+                    </select>
+                  </label>
+                </div>
+
+                {/* ページあたりの問題数 */}
+                <div>
+                  <div style={{ marginBottom: '0.2rem' }}>1ページの問題数：</div>
+                  <label>
+                    <select
+                      value={pageSize}
+                      onChange={(e) => setPageSize(Number(e.target.value))}
+                    >
+                      <option value={1}>1</option>
+                      <option value={5}>5</option>
+                      <option value={15}>15</option>
+                      <option value={30}>30</option>
+                      <option value={50}>50</option>
+                    </select>
+                  </label>
+                </div>
+
+                {/* 出題順・例文表示 */}
+                <div>
+                  <div style={{ marginBottom: '0.2rem' }}>その他：</div>
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      gap: '0.75rem',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <label>
+                      出題順：
+                      <select
+                        value={sessionConfig.shuffle ? 'random' : 'sequential'}
+                        onChange={(e) =>
+                          setSessionConfig((prev) => ({
+                            ...prev,
+                            shuffle: e.target.value === 'random',
+                          }))
+                        }
+                        style={{ marginLeft: '0.25rem' }}
+                      >
+                        <option value="sequential">昇順</option>
+                        <option value="random">ランダム</option>
+                      </select>
+                    </label>
+
+                    <label>
+                      例文の表示：
+                      <select
+                        value={sessionConfig.showExamples}
+                        onChange={(e) =>
+                          setSessionConfig((prev) => ({
+                            ...prev,
+                            showExamples: e.target.value as ShowExamplesMode,
+                          }))
+                        }
+                        style={{ marginLeft: '0.25rem' }}
+                      >
+                        <option value="auto">多義語のみ（おすすめ）</option>
+                        <option value="always">常に表示</option>
+                        <option value="never">表示しない</option>
+                      </select>
+                    </label>
+
+                    <label>
+                      入力方法：
+                      <select
+                        value={inputMode}
+                        onChange={(e) => setInputMode(e.target.value as InputMode)}
+                        style={{ marginLeft: '0.25rem' }}
+                      >
+                        <option value="text">キーボード</option>
+                        <option value="handwriting">手書き</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
               </div>
 
-              <label style={{ fontSize: '0.85rem' }}>
-                ✍ 入力方法：
-                <select
-                  value={inputMode}
-                  onChange={(e) =>
-                    setInputMode(e.target.value as InputMode)
-                  }
-                  style={{ marginLeft: '0.25rem' }}
-                >
-                  <option value="text">キーボード</option>
-                  <option value="handwriting">手書き</option>
-                </select>
-              </label>
-
-              {wordsData && (
-                <label style={{ fontSize: '0.85rem' }}>
-                  📚 単語帳：
-                  <select
-                    value={wordsData.bookId}
-                    onChange={() => {}}
-                    style={{ marginLeft: '0.25rem' }}
-                    disabled
-                  >
-                    <option value={wordsData.bookId}>
-                      {wordsData.bookName}
-                    </option>
-                  </select>
-                </label>
-              )}
-            </div>
-
-            {/* 中段：詳細設定 */}
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                gap: '0.75rem',
-                alignItems: 'center',
-                fontSize: '0.9rem',
-              }}
-            >
-              <label>
-                デッキ：
-                <select
-                  value={sessionConfig.deckId}
-                  onChange={(e) =>
-                    setSessionConfig((prev) => ({
-                      ...prev,
-                      deckId: e.target.value,
-                    }))
-                  }
-                  style={{ marginLeft: '0.25rem' }}
-                >
-                  <option value="core">金のフレーズ（本体）</option>
-                  {/* 今後ここに他の本体・派生デッキを追加 */}
-                </select>
-              </label>
-
-              {sessionConfig.mode === 'index' && (
-                <>
-                  <label>
-                    範囲 from:
-                    <input
-                      type="number"
-                      min={1}
-                      value={sessionConfig.startIndex}
-                      onChange={(e) =>
-                        setSessionConfig((prev) => ({
-                          ...prev,
-                          startIndex: Number(
-                            e.target.value || 1
-                          ),
-                        }))
-                      }
-                      style={{
-                        width: '4.5rem',
-                        marginLeft: '0.25rem',
-                      }}
-                    />
-                  </label>
-                  <label>
-                    to:
-                    <input
-                      type="number"
-                      min={1}
-                      value={sessionConfig.endIndex}
-                      onChange={(e) =>
-                        setSessionConfig((prev) => ({
-                          ...prev,
-                          endIndex: Number(
-                            e.target.value ||
-                              prev.startIndex ||
-                              1
-                          ),
-                        }))
-                      }
-                      style={{
-                        width: '4.5rem',
-                        marginLeft: '0.25rem',
-                      }}
-                    />
-                  </label>
-                </>
-              )}
-
-              {sessionConfig.mode === 'level' && (
-                <label>
-                  レベル：
-                  <select
-                    value={sessionConfig.level}
-                    onChange={(e) =>
-                      setSessionConfig((prev) => ({
-                        ...prev,
-                        level: e.target.value as LevelFilter,
-                      }))
-                    }
-                    style={{ marginLeft: '0.25rem' }}
-                  >
-                    <option value="all">全レベル</option>
-                    <option value="600">600</option>
-                    <option value="730">730</option>
-                    <option value="860">860</option>
-                    <option value="990">990</option>
-                  </select>
-                </label>
-              )}
-
-              <label>
-                出題方向：
-                <select
-                  value={sessionConfig.direction}
-                  onChange={(e) =>
-                    setSessionConfig((prev) => ({
-                      ...prev,
-                      direction:
-                        e.target.value as Direction,
-                    }))
-                  }
-                  style={{ marginLeft: '0.25rem' }}
-                >
-                  <option value="en_to_jp">
-                    英 → 日（意味）
-                  </option>
-                  <option value="jp_to_en">
-                    日 → 英（スペル）
-                  </option>
-                </select>
-              </label>
-
-              <label>
-                1ページの問題数：
-                <select
-                  value={pageSize}
-                  onChange={(e) =>
-                    setPageSize(Number(e.target.value))
-                  }
-                  style={{ marginLeft: '0.25rem' }}
-                >
-                  <option value={1}>1</option>
-                  <option value={5}>5</option>
-                  <option value={15}>15</option>
-                  <option value={30}>30</option>
-                  <option value={50}>50</option>
-                </select>
-              </label>
-
-              <label>
-                出題順：
-                <select
-                  value={
-                    sessionConfig.shuffle
-                      ? 'random'
-                      : 'sequential'
-                  }
-                  onChange={(e) =>
-                    setSessionConfig((prev) => ({
-                      ...prev,
-                      shuffle: e.target.value === 'random',
-                    }))
-                  }
-                  style={{ marginLeft: '0.25rem' }}
-                >
-                  <option value="sequential">昇順</option>
-                  <option value="random">ランダム</option>
-                </select>
-              </label>
-
-              <label>
-                例文の表示：
-                <select
-                  value={sessionConfig.showExamples}
-                  onChange={(e) =>
-                    setSessionConfig((prev) => ({
-                      ...prev,
-                      showExamples:
-                        e.target.value as ShowExamplesMode,
-                    }))
-                  }
-                  style={{ marginLeft: '0.25rem' }}
-                >
-                  <option value="auto">
-                    多義語のみ（おすすめ）
-                  </option>
-                  <option value="always">常に表示</option>
-                  <option value="never">表示しない</option>
-                </select>
-              </label>
-            </div>
-
-            {/* 下段：開始ボタン */}
-            <div style={{ marginTop: '0.75rem' }}>
-              <button
-                onClick={handleStartSession}
+              {/* 下段：開始ボタン */}
+              <div
                 style={{
-                  background: accent,
-                  color: '#ffffff',
-                  borderRadius: 999,
-                  border: 'none',
-                  padding: '0.45rem 1.1rem',
-                  cursor: 'pointer',
-                  fontSize: '0.9rem',
+                  marginTop: '0.75rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.75rem',
+                  flexWrap: 'wrap',
                 }}
               >
-                ▶ 通常セッション開始
-              </button>
-              <button
-                onClick={handleStartWrongSession}
-                style={{
-                  marginLeft: '0.5rem',
-                  background: '#e5e7eb',
-                  color: '#111827',
-                  borderRadius: 999,
-                  border: 'none',
-                  padding: '0.45rem 1.1rem',
-                  cursor: 'pointer',
-                  fontSize: '0.9rem',
-                }}
-              >
-                🔁 苦手単語モードで開始
-              </button>
-              {sessionItems.length > 0 && (
-                <span
+                <button
+                  onClick={handleStartTest}
                   style={{
-                    marginLeft: '0.75rem',
-                    fontSize: '0.85rem',
-                    color: '#4b5563',
+                    background: accent,
+                    color: '#ffffff',
+                    borderRadius: 999,
+                    border: 'none',
+                    padding: '0.45rem 1.1rem',
+                    cursor: 'pointer',
+                    fontSize: '0.9rem',
                   }}
                 >
-                  現在: {sessionItems.length} 問 /{' '}
-                  {totalPages} ページ
-                </span>
-              )}
-            </div>
-          </section>
+                  ▶ テスト開始
+                </button>
+              </div>
+            </section>
+          )}
+
+          {/* セッション概要（開始後） */}
+          {wordsData && sessionItems.length > 0 && (
+            <section
+              style={{
+                marginBottom: '1rem',
+                padding: '0.75rem 1rem',
+                borderRadius: 12,
+                background: '#0f172a',
+                color: '#e5e7eb',
+                display: 'flex',
+                flexWrap: 'wrap',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: '0.75rem',
+              }}
+            >
+              <div style={{ fontSize: '0.9rem' }}>
+                <div>
+                  📚 {wordsData.bookName} / デッキ：{getDeckLabel(sessionConfig.deckId)}
+                </div>
+                <div
+                  style={{
+                    fontSize: '0.85rem',
+                    color: '#cbd5f5',
+                    marginTop: '0.15rem',
+                  }}
+                >
+                  {sessionConfig.mode === 'index'
+                    ? `範囲：${sessionConfig.startIndex}〜${sessionConfig.endIndex}`
+                    : `レベル：${
+                        sessionConfig.level === 'all' ? '全レベル' : sessionConfig.level
+                      }`}
+                  {' / '}
+                  対象：
+                  {sessionConfig.target === 'all' ? 'すべての単語' : '間違えた単語のみ'}
+                  {' / '}
+                  {sessionItems.length} 問
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleResetSession}
+                style={{
+                  borderRadius: 999,
+                  border: 'none',
+                  padding: '0.35rem 0.9rem',
+                  background: '#e5e7eb',
+                  color: '#111827',
+                  cursor: 'pointer',
+                  fontSize: '0.85rem',
+                }}
+              >
+                🔄 出題設定に戻る
+              </button>
+            </section>
+          )}
 
           {/* データ読み込み状態 */}
           {!wordsData && <div>単語データを読み込み中…</div>}
@@ -1629,736 +1733,675 @@ function App() {
                 color: '#4b5563',
               }}
             >
-              出題設定を調整して、セッションを開始してください。
+              出題設定を調整して「テスト開始」を押すと、テスト／単語カードで共通の範囲が
+              セットされます。
             </p>
           )}
 
           {/* テストタブ */}
-          {wordsData &&
-            sessionItems.length > 0 &&
-            viewMode === 'test' && (
-              <section
+          {wordsData && sessionItems.length > 0 && viewMode === 'test' && (
+            <section
+              ref={testTopRef}
+              style={{
+                marginBottom: '2rem',
+                padding: '1rem',
+                border: '1px solid #e5e7eb',
+                borderRadius: 16,
+              }}
+            >
+              <h2
                 style={{
-                  marginBottom: '2rem',
-                  padding: '1rem',
-                  border: '1px solid #e5e7eb',
-                  borderRadius: 16,
+                  fontSize: '1.05rem',
+                  marginTop: 0,
+                  marginBottom: '0.4rem',
                 }}
               >
-                <h2
-                  style={{
-                    fontSize: '1.05rem',
-                    marginTop: 0,
-                    marginBottom: '0.4rem',
-                  }}
-                >
-                  📝 テストモード
-                </h2>
-                <p
-                  style={{
-                    fontSize: '0.9rem',
-                    marginTop: 0,
-                    color: '#4b5563',
-                  }}
-                >
-                  ページ {currentPage + 1} / {totalPages}（
-                  {startIndex + 1}〜{endIndex} 問） /{' '}
-                  <strong>
-                    {isEnToJp ? '英 → 日' : '日 → 英'}
-                  </strong>
-                </p>
-
-                {pageItems.map((word, idx) => {
-                  const absIndex = startIndex + idx;
-                  const answerValue = answers[absIndex] ?? '';
-                  const mark = marks[absIndex];
-
-                  return (
-                    <div
-                      key={word.id}
-                      style={{
-                        marginBottom: '1rem',
-                        paddingBottom: '0.75rem',
-                        borderBottom: '1px solid #f3f4f6',
-                      }}
-                    >
-                      <div style={{ fontSize: '1.05rem' }}>
-                        問題 {absIndex + 1}.{' '}
-                        <strong>
-                          {isEnToJp
-                            ? word.english
-                            : word.japanese}
-                        </strong>
-                        {isEnToJp && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              speakEnglish(
-                                word.audio_text || word.english
-                              )
-                            }
-                            style={{
-                              marginLeft: '0.5rem',
-                              fontSize: '0.8rem',
-                              border: 'none',
-                              background: 'transparent',
-                              cursor: 'pointer',
-                            }}
-                          >
-                            🔊 単語
-                          </button>
-                        )}
-                        {word.example_en && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              speakEnglish(word.example_en)
-                            }
-                            style={{
-                              marginLeft: '0.25rem',
-                              fontSize: '0.8rem',
-                              border: 'none',
-                              background: 'transparent',
-                              cursor: 'pointer',
-                            }}
-                          >
-                            🔊 例文
-                          </button>
-                        )}
-                      </div>
-
-                      {shouldShowExampleInQuestion(word) && (
-                        <div
-                          style={{
-                            fontStyle: 'italic',
-                            color: '#555',
-                            fontSize: '0.9rem',
-                            marginTop: '0.1rem',
-                          }}
-                        >
-                          例文:{' '}
-                          {isEnToJp
-                            ? word.example_en
-                            : word.example_jp}
-                        </div>
-                      )}
-
-                      <div style={{ marginTop: '0.25rem' }}>
-                        {inputMode === 'text' ? (
-                          <label>
-                            あなたの答え：
-                            <input
-                              type="text"
-                              value={answerValue}
-                              onChange={(e) =>
-                                setAnswers((prev) => ({
-                                  ...prev,
-                                  [absIndex]:
-                                    e.target.value,
-                                }))
-                              }
-                              style={{
-                                marginLeft: '0.5rem',
-                                width: '60%',
-                                maxWidth: 400,
-                              }}
-                              placeholder={
-                                isEnToJp
-                                  ? '日本語の意味'
-                                  : '英語の単語'
-                              }
-                            />
-                          </label>
-                        ) : (
-                          <div>
-                            <div
-                              style={{
-                                marginBottom: '0.25rem',
-                                fontSize: '0.9rem',
-                              }}
-                            >
-                              手書きで回答：
-                            </div>
-                            <HandwritingCanvas height={140} />
-                          </div>
-                        )}
-                      </div>
-
-                      {showAnswers && (
-                        <div
-                          style={{
-                            marginTop: '0.25rem',
-                            padding: '0.4rem 0.5rem',
-                            borderRadius: 12,
-                            border: '1px solid #e5e7eb',
-                            background: '#f9fafb',
-                          }}
-                        >
-                          <div>
-                            正解：
-                            {isEnToJp
-                              ? word.japanese
-                              : word.english}
-                          </div>
-                          <div
-                            style={{
-                              fontSize: '0.9rem',
-                              marginTop: '0.2rem',
-                            }}
-                          >
-                            例文（日本語）：{word.example_jp}
-                          </div>
-                          <div style={{ fontSize: '0.9rem' }}>
-                            例文（英語）：{word.example_en}
-                          </div>
-
-                          <div style={{ marginTop: '0.25rem' }}>
-                            自己採点：
-                            <button
-                              onClick={() =>
-                                setMarks((prev) => ({
-                                  ...prev,
-                                  [absIndex]: 'correct',
-                                }))
-                              }
-                              style={{
-                                marginLeft: '0.5rem',
-                                fontSize: '0.85rem',
-                                fontWeight:
-                                  mark === 'correct'
-                                    ? 'bold'
-                                    : 'normal',
-                              }}
-                            >
-                              ○ 正解
-                            </button>
-                            <button
-                              onClick={() =>
-                                setMarks((prev) => ({
-                                  ...prev,
-                                  [absIndex]: 'wrong',
-                                }))
-                              }
-                              style={{
-                                marginLeft: '0.5rem',
-                                fontSize: '0.85rem',
-                                fontWeight:
-                                  mark === 'wrong'
-                                    ? 'bold'
-                                    : 'normal',
-                              }}
-                            >
-                              × 不正解
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-
-                <div>
-                  <button
-                    onClick={handleShowAnswersForPage}
-                    style={{
-                      borderRadius: 999,
-                      border: 'none',
-                      padding: '0.4rem 0.8rem',
-                      background: '#e5e7eb',
-                      cursor: 'pointer',
-                      fontSize: '0.9rem',
-                    }}
-                  >
-                    解答を表示（未採点は○扱い）
-                  </button>
-                </div>
-
-                <div style={{ marginTop: '0.75rem' }}>
-                  <button
-                    onClick={handleSaveCurrentPage}
-                    disabled={
-                      isSavingPage || pageItems.length === 0
-                    }
-                    style={{
-                      borderRadius: 999,
-                      border: 'none',
-                      padding: '0.45rem 1.1rem',
-                      background: isSavingPage
-                        ? '#9ca3af'
-                        : accent,
-                      color: '#ffffff',
-                      cursor: isSavingPage
-                        ? 'default'
-                        : 'pointer',
-                      fontSize: '0.9rem',
-                    }}
-                  >
-                    このページを保存して
-                    {currentPage + 1 < totalPages
-                      ? '次へ'
-                      : 'セッション終了'}
-                  </button>
-                </div>
-              </section>
-            )}
-
-          {/* 単語カードタブ */}
-          {wordsData &&
-            sessionItems.length > 0 &&
-            viewMode === 'flash' && (
-              <section
+                📝 テストモード
+              </h2>
+              <p
                 style={{
-                  marginBottom: '2rem',
-                  padding: '1rem',
-                  border: '1px solid #e5e7eb',
-                  borderRadius: 16,
+                  fontSize: '0.9rem',
+                  marginTop: 0,
+                  color: '#4b5563',
                 }}
               >
-                <h2
-                  style={{
-                    fontSize: '1.05rem',
-                    marginTop: 0,
-                    marginBottom: '0.4rem',
-                  }}
-                >
-                  🃏 単語カード
-                </h2>
-                <p
-                  style={{
-                    fontSize: '0.9rem',
-                    marginTop: 0,
-                    color: '#4b5563',
-                  }}
-                >
-                  全 {sessionItems.length} 枚 / 現在{' '}
-                  {cardIndex + 1} 枚目（
-                  {isEnToJp ? '英 → 日' : '日 → 英'}
-                  ）
-                </p>
+                ページ {currentPage + 1} / {totalPages}（{startIndex + 1}〜
+                {endIndex} 問） / <strong>{isEnToJp ? '英 → 日' : '日 → 英'}</strong>
+              </p>
 
-                {/* ドライブモード設定 */}
-                <div
-                  style={{
-                    marginBottom: '0.75rem',
-                    display: 'flex',
-                    flexWrap: 'wrap',
-                    gap: '0.75rem',
-                    alignItems: 'center',
-                  }}
-                >
-                  <label style={{ fontSize: '0.9rem' }}>
-                    <input
-                      type="checkbox"
-                      checked={driveMode}
-                      onChange={(e) => {
-                        const enabled = e.target.checked;
-                        setDriveMode(enabled);
-                        if (enabled) {
-                          setDriveIndex(0);
-                          setDriveStage('word_en');
-                          setDriveRunning(true);
-                        } else {
-                          setDriveRunning(false);
-                          if (
-                            typeof window !== 'undefined' &&
-                            window.speechSynthesis
-                          ) {
-                            window.speechSynthesis.cancel();
-                          }
-                        }
-                      }}
-                      style={{ marginRight: '0.4rem' }}
-                    />
-                    🚗 ドライブモード（自動再生）
-                  </label>
+              {pageItems.map((word, idx) => {
+                const absIndex = startIndex + idx;
+                const answerValue = answers[absIndex] ?? '';
+                const mark = marks[absIndex];
 
-                  {driveMode && (
-                    <label
-                      style={{
-                        fontSize: '0.85rem',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '0.35rem',
-                      }}
-                    >
-                      速度：
-                      <input
-                        type="range"
-                        min={1500}
-                        max={5000}
-                        step={500}
-                        value={driveInterval}
-                        onChange={(e) =>
-                          setDriveInterval(
-                            Number(e.target.value)
-                          )
-                        }
-                      />
-                      <span
-                        style={{
-                          fontSize: '0.8rem',
-                          color: '#4b5563',
-                        }}
-                      >
-                        {driveInterval / 1000} 秒/ステージ
-                      </span>
-                    </label>
-                  )}
-                </div>
-
-                {/* ドライブモード UI */}
-                {driveMode ? (
+                return (
                   <div
+                    key={word.id}
                     style={{
-                      borderRadius: 16,
-                      border: '1px solid #e5e7eb',
-                      background: '#0f172a',
-                      color: '#e5e7eb',
-                      minHeight: viewportKind === 'mobile' ? 260 : 320,
-                      padding: '1.2rem 1rem',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      justifyContent: 'space-between',
+                      marginBottom: '1rem',
+                      paddingBottom: '0.75rem',
+                      borderBottom: '1px solid #f3f4f6',
                     }}
                   >
-                    {sessionItems[driveIndex] && (
-                      <>
-                        <div>
-                          <div
-                            style={{
-                              fontSize: '0.9rem',
-                              marginBottom: '0.35rem',
-                              color: '#9ca3af',
-                            }}
-                          >
-                            {driveStage === 'word_en' &&
-                              '英単語'}
-                            {driveStage === 'example_en' &&
-                              '例文（英語）'}
-                            {driveStage === 'meaning_jp' &&
-                              '日本語の意味'}
-                          </div>
-                          <div
-                            style={{
-                              fontSize:
-                                viewportKind === 'mobile'
-                                  ? '1.6rem'
-                                  : '2rem',
-                              fontWeight: 600,
-                              marginBottom: '0.6rem',
-                            }}
-                          >
-                            {(() => {
-                              const w =
-                                sessionItems[driveIndex];
-                              if (driveStage === 'word_en') {
-                                return w.english;
-                              }
-                              if (
-                                driveStage ===
-                                  'example_en' &&
-                                w.example_en
-                              ) {
-                                return w.example_en;
-                              }
-                              return w.japanese;
-                            })()}
-                          </div>
-                          <div
-                            style={{
-                              fontSize: '0.85rem',
-                              color: '#9ca3af',
-                            }}
-                          >
-                            {(() => {
-                              const w =
-                                sessionItems[driveIndex];
-                              if (driveStage === 'word_en') {
-                                return w.japanese;
-                              }
-                              if (driveStage === 'meaning_jp') {
-                                return w.english;
-                              }
-                              // example_en
-                              return w.example_jp || '';
-                            })()}
-                          </div>
-                        </div>
-
-                        <div
-                          style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            marginTop: '0.75rem',
-                          }}
-                        >
-                          <div
-                            style={{
-                              fontSize: '0.8rem',
-                              color: '#9ca3af',
-                            }}
-                          >
-                            {driveIndex + 1} /{' '}
-                            {sessionItems.length}
-                          </div>
-                          <div
-                            style={{
-                              display: 'flex',
-                              gap: '0.4rem',
-                            }}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setDriveRunning(false);
-                                setDriveMode(false);
-                                if (
-                                  typeof window !==
-                                    'undefined' &&
-                                  window.speechSynthesis
-                                ) {
-                                  window.speechSynthesis.cancel();
-                                }
-                              }}
-                              style={{
-                                borderRadius: 999,
-                                border: 'none',
-                                padding:
-                                  '0.35rem 0.85rem',
-                                background: '#6b7280',
-                                color: '#ffffff',
-                                cursor: 'pointer',
-                                fontSize: '0.85rem',
-                              }}
-                            >
-                              ✕ 終了
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setDriveRunning(
-                                  (prev) => !prev
-                                );
-                              }}
-                              style={{
-                                borderRadius: 999,
-                                border: 'none',
-                                padding:
-                                  '0.35rem 0.85rem',
-                                background: '#22c55e',
-                                color: '#ffffff',
-                                cursor: 'pointer',
-                                fontSize: '0.85rem',
-                              }}
-                            >
-                              {driveRunning ? '⏸ 停止' : '▶ 再生'}
-                            </button>
-                          </div>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                ) : (
-                  // 通常の単語カード UI
-                  <>
-                    {sessionItems[cardIndex] && (
-                      <div
-                        style={{
-                          border: '1px solid #e5e7eb',
-                          borderRadius: 16,
-                          padding: '1rem',
-                          background: '#fffdf8',
-                          minHeight: 140,
-                        }}
-                      >
-                        <div
-                          style={{
-                            fontSize: '1.2rem',
-                            marginBottom: '0.5rem',
-                          }}
-                        >
-                          Q:{' '}
-                          <strong>
-                            {isEnToJp
-                              ? sessionItems[cardIndex]
-                                  .english
-                              : sessionItems[cardIndex]
-                                  .japanese}
-                          </strong>
-                        </div>
-
-                        <div
-                          style={{ marginBottom: '0.5rem' }}
-                        >
-                          {isEnToJp && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                speakEnglish(
-                                  sessionItems[cardIndex]
-                                    .audio_text ||
-                                    sessionItems[cardIndex]
-                                      .english
-                                )
-                              }
-                              style={{
-                                marginRight: '0.5rem',
-                                fontSize: '0.85rem',
-                                borderRadius: 999,
-                                border: 'none',
-                                padding:
-                                  '0.3rem 0.7rem',
-                                background: '#e5e7eb',
-                                cursor: 'pointer',
-                              }}
-                            >
-                              🔊 単語
-                            </button>
-                          )}
-                          {sessionItems[cardIndex]
-                            .example_en && (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                speakEnglish(
-                                  sessionItems[cardIndex]
-                                    .example_en
-                                )
-                              }
-                              style={{
-                                fontSize: '0.85rem',
-                                borderRadius: 999,
-                                border: 'none',
-                                padding:
-                                  '0.3rem 0.7rem',
-                                background: '#e5e7eb',
-                                cursor: 'pointer',
-                              }}
-                            >
-                              🔊 例文
-                            </button>
-                          )}
-                        </div>
-
+                    <div style={{ fontSize: '1.05rem' }}>
+                      問題 {absIndex + 1}.{' '}
+                      <strong>{isEnToJp ? word.english : word.japanese}</strong>
+                      {isEnToJp && (
                         <button
                           type="button"
                           onClick={() =>
-                            setShowCardAnswer(
-                              (prev) => !prev
-                            )
+                            speakEnglish(word.audio_text || word.english)
                           }
                           style={{
-                            borderRadius: 999,
+                            marginLeft: '0.5rem',
+                            fontSize: '0.8rem',
                             border: 'none',
-                            padding: '0.35rem 0.8rem',
-                            background: accent,
-                            color: '#ffffff',
+                            background: 'transparent',
                             cursor: 'pointer',
-                            fontSize: '0.9rem',
                           }}
                         >
-                          {showCardAnswer
-                            ? '答えを隠す'
-                            : '答えを表示'}
+                          🔊 単語
                         </button>
+                      )}
+                      {word.example_en && shouldShowExampleInQuestion(word) && (
+                        <button
+                          type="button"
+                          onClick={() => speakEnglish(word.example_en)}
+                          style={{
+                            marginLeft: '0.25rem',
+                            fontSize: '0.8rem',
+                            border: 'none',
+                            background: 'transparent',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          🔊 例文
+                        </button>
+                      )}
+                    </div>
 
-                        {showCardAnswer && (
-                          <div
-                            style={{ marginTop: '0.75rem' }}
-                          >
-                            <div>
-                              答え：
-                              <strong>
-                                {isEnToJp
-                                  ? sessionItems[
-                                      cardIndex
-                                    ].japanese
-                                  : sessionItems[cardIndex]
-                                      .english}
-                              </strong>
-                            </div>
-                            <div
-                              style={{
-                                marginTop: '0.25rem',
-                                fontSize: '0.95rem',
-                              }}
-                            >
-                              例文（日本語）：
-                              {
-                                sessionItems[cardIndex]
-                                  .example_jp
-                              }
-                            </div>
-                            <div
-                              style={{ fontSize: '0.95rem' }}
-                            >
-                              例文（英語）：
-                              {
-                                sessionItems[cardIndex]
-                                  .example_en
-                              }
-                            </div>
-                          </div>
-                        )}
+                    {shouldShowExampleInQuestion(word) && (
+                      <div
+                        style={{
+                          fontStyle: 'italic',
+                          color: '#555',
+                          fontSize: '0.9rem',
+                          marginTop: '0.1rem',
+                        }}
+                      >
+                        例文:{' '}
+                        {isEnToJp ? word.example_en : word.example_jp}
                       </div>
                     )}
 
-                    <div
+                    <div style={{ marginTop: '0.25rem' }}>
+                      {inputMode === 'text' ? (
+                        <label>
+                          あなたの答え：
+                          <input
+                            type="text"
+                            value={answerValue}
+                            onChange={(e) =>
+                              setAnswers((prev) => ({
+                                ...prev,
+                                [absIndex]: e.target.value,
+                              }))
+                            }
+                            style={{
+                              marginLeft: '0.5rem',
+                              width: '60%',
+                              maxWidth: 400,
+                            }}
+                            placeholder={
+                              isEnToJp ? '日本語の意味' : '英語の単語'
+                            }
+                          />
+                        </label>
+                      ) : (
+                        <div>
+                          <div
+                            style={{
+                              marginBottom: '0.25rem',
+                              fontSize: '0.9rem',
+                            }}
+                          >
+                            手書きで回答：
+                          </div>
+                          <HandwritingCanvas height={140} />
+                        </div>
+                      )}
+                    </div>
+
+                    {showAnswers && (
+                      <div
+                        style={{
+                          marginTop: '0.25rem',
+                          padding: '0.4rem 0.5rem',
+                          borderRadius: 12,
+                          border: '1px solid #e5e7eb',
+                          background: '#f9fafb',
+                        }}
+                      >
+                        <div>
+                          正解：
+                          {isEnToJp ? word.japanese : word.english}
+                        </div>
+                        <div
+                          style={{
+                            fontSize: '0.9rem',
+                            marginTop: '0.2rem',
+                          }}
+                        >
+                          例文（日本語）：{word.example_jp}
+                        </div>
+                        <div style={{ fontSize: '0.9rem' }}>
+                          例文（英語）：{word.example_en}
+                        </div>
+
+                        <div style={{ marginTop: '0.25rem' }}>
+                          自己採点：
+                          <button
+                            onClick={() =>
+                              setMarks((prev) => ({
+                                ...prev,
+                                [absIndex]: 'correct',
+                              }))
+                            }
+                            style={{
+                              marginLeft: '0.5rem',
+                              fontSize: '0.85rem',
+                              fontWeight:
+                                mark === 'correct' ? 'bold' : 'normal',
+                            }}
+                          >
+                            ○ 正解
+                          </button>
+                          <button
+                            onClick={() =>
+                              setMarks((prev) => ({
+                                ...prev,
+                                [absIndex]: 'wrong',
+                              }))
+                            }
+                            style={{
+                              marginLeft: '0.5rem',
+                              fontSize: '0.85rem',
+                              fontWeight:
+                                mark === 'wrong' ? 'bold' : 'normal',
+                            }}
+                          >
+                            × 不正解
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              <div>
+                <button
+                  onClick={handleShowAnswersForPage}
+                  style={{
+                    borderRadius: 999,
+                    border: 'none',
+                    padding: '0.4rem 0.8rem',
+                    background: '#e5e7eb',
+                    cursor: 'pointer',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  採点を開始（未採点は○扱い）
+                </button>
+              </div>
+
+              <div style={{ marginTop: '0.75rem' }}>
+                <button
+                  onClick={handleSaveCurrentPage}
+                  disabled={isSavingPage || pageItems.length === 0}
+                  style={{
+                    borderRadius: 999,
+                    border: 'none',
+                    padding: '0.45rem 1.1rem',
+                    background: isSavingPage ? '#9ca3af' : accent,
+                    color: '#ffffff',
+                    cursor: isSavingPage ? 'default' : 'pointer',
+                    fontSize: '0.9rem',
+                  }}
+                >
+                  このページを保存して
+                  {currentPage + 1 < totalPages ? '次へ' : 'セッション終了'}
+                </button>
+              </div>
+            </section>
+          )}
+
+          {/* 単語カードタブ */}
+          {wordsData && sessionItems.length > 0 && viewMode === 'flash' && (
+            <section
+              style={{
+                marginBottom: '2rem',
+                padding: '1rem',
+                border: '1px solid #e5e7eb',
+                borderRadius: 16,
+              }}
+            >
+              <h2
+                style={{
+                  fontSize: '1.05rem',
+                  marginTop: 0,
+                  marginBottom: '0.4rem',
+                }}
+              >
+                🃏 単語カード
+              </h2>
+              <p
+                style={{
+                  fontSize: '0.9rem',
+                  marginTop: 0,
+                  color: '#4b5563',
+                }}
+              >
+                全 {sessionItems.length} 枚 / 現在 {cardIndex + 1} 枚目（
+                {isEnToJp ? '英 → 日' : '日 → 英'}）
+              </p>
+
+              {/* ドライブモード設定 */}
+              <div
+                style={{
+                  marginBottom: '0.75rem',
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '0.75rem',
+                  alignItems: 'center',
+                }}
+              >
+                <label style={{ fontSize: '0.9rem' }}>
+                  <input
+                    type="checkbox"
+                    checked={driveMode}
+                    onChange={(e) => {
+                      const enabled = e.target.checked;
+                      setDriveMode(enabled);
+                      if (enabled) {
+                        setDriveIndex(0);
+                        setDriveStage('word_en');
+                        setDriveRunning(true);
+                      } else {
+                        setDriveRunning(false);
+                        if (
+                          typeof window !== 'undefined' &&
+                          window.speechSynthesis
+                        ) {
+                          window.speechSynthesis.cancel();
+                        }
+                      }
+                    }}
+                    style={{ marginRight: '0.4rem' }}
+                  />
+                  🚗 ドライブモード（自動再生）
+                </label>
+
+                {driveMode && (
+                  <label
+                    style={{
+                      fontSize: '0.85rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
+                    }}
+                  >
+                    速度：
+                    <input
+                      type="range"
+                      min={1500}
+                      max={5000}
+                      step={500}
+                      value={driveInterval}
+                      onChange={(e) => setDriveInterval(Number(e.target.value))}
+                    />
+                    <span
                       style={{
-                        marginTop: '0.75rem',
-                        display: 'flex',
-                        gap: '0.5rem',
+                        fontSize: '0.8rem',
+                        color: '#4b5563',
                       }}
                     >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCardIndex((prev) =>
-                            prev === 0
-                              ? sessionItems.length - 1
-                              : prev - 1
-                          );
-                          setShowCardAnswer(false);
-                        }}
-                        style={{
-                          borderRadius: 999,
-                          border: 'none',
-                          padding: '0.35rem 0.8rem',
-                          background: '#e5e7eb',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        ← 前へ
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setCardIndex((prev) =>
-                            prev + 1 >=
-                            sessionItems.length
-                              ? 0
-                              : prev + 1
-                          );
-                          setShowCardAnswer(false);
-                        }}
-                        style={{
-                          borderRadius: 999,
-                          border: 'none',
-                          padding: '0.35rem 0.8rem',
-                          background: '#e5e7eb',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        次へ →
-                      </button>
-                    </div>
-                  </>
+                      {driveInterval / 1000} 秒/ステージ
+                    </span>
+                  </label>
                 )}
-              </section>
-            )}
+              </div>
+
+              {/* 通常の単語カード UI（ドライブモード OFF のとき） */}
+              {!driveMode && sessionItems[cardIndex] && (
+                <>
+                  <div
+                    style={{
+                      border: '1px solid #e5e7eb',
+                      borderRadius: 16,
+                      padding: '1rem',
+                      background: '#fffdf8',
+                      minHeight: 140,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: '1.2rem',
+                        marginBottom: '0.5rem',
+                      }}
+                    >
+                      Q:{' '}
+                      <strong>
+                        {isEnToJp
+                          ? sessionItems[cardIndex].english
+                          : sessionItems[cardIndex].japanese}
+                      </strong>
+                    </div>
+
+                    <div style={{ marginBottom: '0.5rem' }}>
+                      {isEnToJp && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            speakEnglish(
+                              sessionItems[cardIndex].audio_text ||
+                                sessionItems[cardIndex].english
+                            )
+                          }
+                          style={{
+                            marginRight: '0.5rem',
+                            fontSize: '0.85rem',
+                            borderRadius: 999,
+                            border: 'none',
+                            padding: '0.3rem 0.7rem',
+                            background: '#e5e7eb',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          🔊 単語
+                        </button>
+                      )}
+                      {sessionItems[cardIndex].example_en && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            speakEnglish(
+                              sessionItems[cardIndex].example_en
+                            )
+                          }
+                          style={{
+                            fontSize: '0.85rem',
+                            borderRadius: 999,
+                            border: 'none',
+                            padding: '0.3rem 0.7rem',
+                            background: '#e5e7eb',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          🔊 例文
+                        </button>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setShowCardAnswer((prev) => !prev)
+                      }
+                      style={{
+                        borderRadius: 999,
+                        border: 'none',
+                        padding: '0.35rem 0.8rem',
+                        background: accent,
+                        color: '#ffffff',
+                        cursor: 'pointer',
+                        fontSize: '0.9rem',
+                      }}
+                    >
+                      {showCardAnswer ? '答えを隠す' : '答えを表示'}
+                    </button>
+
+                    {showCardAnswer && (
+                      <div style={{ marginTop: '0.75rem' }}>
+                        <div>
+                          答え：
+                          <strong>
+                            {isEnToJp
+                              ? sessionItems[cardIndex].japanese
+                              : sessionItems[cardIndex].english}
+                          </strong>
+                        </div>
+                        <div
+                          style={{
+                            marginTop: '0.25rem',
+                            fontSize: '0.95rem',
+                          }}
+                        >
+                          例文（日本語）：
+                          {sessionItems[cardIndex].example_jp}
+                        </div>
+                        <div style={{ fontSize: '0.95rem' }}>
+                          例文（英語）：
+                          {sessionItems[cardIndex].example_en}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div
+                    style={{
+                      marginTop: '0.75rem',
+                      display: 'flex',
+                      gap: '0.5rem',
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCardIndex((prev) =>
+                          prev === 0
+                            ? sessionItems.length - 1
+                            : prev - 1
+                        );
+                        setShowCardAnswer(false);
+                      }}
+                      style={{
+                        borderRadius: 999,
+                        border: 'none',
+                        padding: '0.35rem 0.8rem',
+                        background: '#e5e7eb',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      ← 前へ
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCardIndex((prev) =>
+                          prev + 1 >= sessionItems.length ? 0 : prev + 1
+                        );
+                        setShowCardAnswer(false);
+                      }}
+                      style={{
+                        borderRadius: 999,
+                        border: 'none',
+                        padding: '0.35rem 0.8rem',
+                        background: '#e5e7eb',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      次へ →
+                    </button>
+                  </div>
+                </>
+              )}
+            </section>
+          )}
         </main>
       </div>
+
+      {/* ドライブモード用フルスクリーンオーバーレイ */}
+      {driveMode && viewMode === 'flash' && sessionItems.length > 0 && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: '#020617',
+            color: '#e5e7eb',
+            zIndex: 55,
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'space-between',
+            padding: viewportKind === 'mobile' ? '1.2rem 1rem' : '1.8rem 2rem',
+          }}
+        >
+          {sessionItems[driveIndex] && (
+            <>
+              <div style={{ fontSize: '0.9rem', color: '#9ca3af' }}>
+                🚗 ドライブモード / {driveIndex + 1} / {sessionItems.length}
+              </div>
+
+              <div
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  textAlign: 'center',
+                  padding: '0.5rem',
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: '0.9rem',
+                    marginBottom: '0.6rem',
+                    color: '#9ca3af',
+                  }}
+                >
+                  {driveStage === 'word_en' && '英単語'}
+                  {driveStage === 'example_en' && '例文（英語）'}
+                  {driveStage === 'meaning_jp' && '日本語の意味'}
+                </div>
+                <div
+                  style={{
+                    maxWidth: 900,
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize:
+                        viewportKind === 'mobile'
+                          ? '2.3rem'
+                          : viewportKind === 'tablet'
+                          ? '3rem'
+                          : '3.5rem',
+                      fontWeight: 700,
+                      marginBottom: '0.7rem',
+                      lineHeight: 1.15,
+                    }}
+                  >
+                    {(() => {
+                      const w = sessionItems[driveIndex];
+                      if (driveStage === 'word_en') {
+                        return w.english;
+                      }
+                      if (driveStage === 'example_en' && w.example_en) {
+                        return w.example_en;
+                      }
+                      return w.japanese;
+                    })()}
+                  </div>
+                  <div
+                    style={{
+                      fontSize:
+                        viewportKind === 'mobile'
+                          ? '1rem'
+                          : viewportKind === 'tablet'
+                          ? '1.1rem'
+                          : '1.2rem',
+                      color: '#9ca3af',
+                    }}
+                  >
+                    {(() => {
+                      const w = sessionItems[driveIndex];
+                      if (driveStage === 'word_en') {
+                        return w.japanese;
+                      }
+                      if (driveStage === 'meaning_jp') {
+                        return w.english;
+                      }
+                      // example_en
+                      return w.example_jp || '';
+                    })()}
+                  </div>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '0.75rem',
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: '0.8rem',
+                    color: '#9ca3af',
+                  }}
+                >
+                  {driveInterval / 1000} 秒/ステージ
+                </div>
+                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDriveRunning(false);
+                      setDriveMode(false);
+                      if (
+                        typeof window !== 'undefined' &&
+                        window.speechSynthesis
+                      ) {
+                        window.speechSynthesis.cancel();
+                      }
+                    }}
+                    style={{
+                      borderRadius: 999,
+                      border: 'none',
+                      padding: '0.35rem 0.85rem',
+                      background: '#6b7280',
+                      color: '#ffffff',
+                      cursor: 'pointer',
+                      fontSize: '0.85rem',
+                    }}
+                  >
+                    ✕ 終了
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDriveRunning((prev) => !prev)}
+                    style={{
+                      borderRadius: 999,
+                      border: 'none',
+                      padding: '0.35rem 0.85rem',
+                      background: '#22c55e',
+                      color: '#ffffff',
+                      cursor: 'pointer',
+                      fontSize: '0.85rem',
+                    }}
+                  >
+                    {driveRunning ? '⏸ 停止' : '▶ 再生'}
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       {/* 設定モーダル */}
       {showSettings && (
@@ -2381,13 +2424,9 @@ function App() {
               borderRadius: 20,
               maxWidth: 520,
               width: '100%',
-              margin:
-                viewportKind === 'mobile'
-                  ? '0.75rem'
-                  : '1rem',
+              margin: viewportKind === 'mobile' ? '0.75rem' : '1rem',
               padding: '1rem 1.25rem 1.25rem',
-              boxShadow:
-                '0 20px 50px rgba(15,23,42,0.4)',
+              boxShadow: '0 20px 50px rgba(15,23,42,0.4)',
             }}
           >
             <div
@@ -2441,7 +2480,7 @@ function App() {
                     marginBottom: '0.5rem',
                   }}
                 >
-                  入力・出題
+                  入力・出題（デフォルト）
                 </h3>
                 <div style={{ marginBottom: '0.5rem' }}>
                   <label>
@@ -2449,74 +2488,24 @@ function App() {
                     <select
                       value={inputMode}
                       onChange={(e) =>
-                        setInputMode(
-                          e.target.value as InputMode
-                        )
+                        setInputMode(e.target.value as InputMode)
                       }
                       style={{ marginLeft: '0.4rem' }}
                     >
-                      <option value="text">
-                        キーボード
-                      </option>
-                      <option value="handwriting">
-                        手書き
-                      </option>
+                      <option value="text">キーボード</option>
+                      <option value="handwriting">手書き</option>
                     </select>
                   </label>
                 </div>
-                <div style={{ marginBottom: '0.5rem' }}>
-                  <label>
-                    出題順：
-                    <select
-                      value={
-                        sessionConfig.shuffle
-                          ? 'random'
-                          : 'sequential'
-                      }
-                      onChange={(e) =>
-                        setSessionConfig((prev) => ({
-                          ...prev,
-                          shuffle:
-                            e.target.value === 'random',
-                        }))
-                      }
-                      style={{ marginLeft: '0.4rem' }}
-                    >
-                      <option value="sequential">
-                        昇順
-                      </option>
-                      <option value="random">
-                        ランダム
-                      </option>
-                    </select>
-                  </label>
-                </div>
-                <div style={{ marginBottom: '0.5rem' }}>
-                  <label>
-                    例文の表示：
-                    <select
-                      value={sessionConfig.showExamples}
-                      onChange={(e) =>
-                        setSessionConfig((prev) => ({
-                          ...prev,
-                          showExamples:
-                            e.target.value as ShowExamplesMode,
-                        }))
-                      }
-                      style={{ marginLeft: '0.4rem' }}
-                    >
-                      <option value="auto">
-                        多義語のみ（おすすめ）
-                      </option>
-                      <option value="always">
-                        常に表示
-                      </option>
-                      <option value="never">
-                        表示しない
-                      </option>
-                    </select>
-                  </label>
-                </div>
+                <p
+                  style={{
+                    fontSize: '0.8rem',
+                    color: '#6b7280',
+                    margin: 0,
+                  }}
+                >
+                  ここで決めた入力方法は、新しいセッション開始時の初期値になります。
+                </p>
               </div>
 
               <div>
@@ -2536,7 +2525,7 @@ function App() {
                     color: '#6b7280',
                   }}
                 >
-                  今後、読み上げの自動再生の詳細設定やテーマ切り替えなども
+                  今後、読み上げの自動再生の細かい設定やテーマ切り替えなども
                   ここに追加していく予定です。
                 </p>
               </div>
@@ -2566,15 +2555,11 @@ function App() {
               borderRadius: 20,
               maxWidth: 640,
               width: '100%',
-              margin:
-                viewportKind === 'mobile'
-                  ? '0.75rem'
-                  : '1rem',
+              margin: viewportKind === 'mobile' ? '0.75rem' : '1rem',
               padding: '1rem 1.25rem 1.2rem',
               maxHeight: '90vh',
               overflow: 'auto',
-              boxShadow:
-                '0 20px 50px rgba(15,23,42,0.4)',
+              boxShadow: '0 20px 50px rgba(15,23,42,0.4)',
             }}
           >
             <div
@@ -2626,38 +2611,15 @@ function App() {
               >
                 📈 学習サマリー
               </h3>
-              {isLoadingOverview && (
-                <p>読み込み中です…</p>
-              )}
+              {isLoadingOverview && <p>読み込み中です…</p>}
               {userOverview && (
                 <div>
                   <div>
-                    ユーザー：{' '}
-                    <strong>
-                      {userOverview.display_name}
-                    </strong>
+                    ユーザー： <strong>{userOverview.display_name}</strong>
                   </div>
                   <div style={{ marginTop: '0.25rem' }}>
-                    累計 正解：
-                    {userOverview.total_correct} / 不正解：
-                    {userOverview.total_wrong}
-                  </div>
-                  <div>
-                    累計 問題数：
-                    {userOverview.total_correct +
-                      userOverview.total_wrong}
-                    （
-                    {userOverview.total_correct +
-                    userOverview.total_wrong >
-                    0
-                      ? Math.round(
-                          (userOverview.total_correct /
-                            (userOverview.total_correct +
-                              userOverview.total_wrong)) *
-                            100
-                        )
-                      : 0}
-                    % 正解）
+                    累計 正解数：
+                    {userOverview.total_correct}
                   </div>
                   <div>
                     今週の正解数：
@@ -2693,9 +2655,7 @@ function App() {
                 <input
                   type="text"
                   value={displayNameEdit}
-                  onChange={(e) =>
-                    setDisplayNameEdit(e.target.value)
-                  }
+                  onChange={(e) => setDisplayNameEdit(e.target.value)}
                   placeholder="ランキングなどに表示する名前"
                   style={{
                     width: '60%',
@@ -2745,12 +2705,9 @@ function App() {
               >
                 ❌ よく間違える単語 Top10
               </h3>
-              {isLoadingMyPageWrong && (
-                <p>読み込み中です…</p>
-              )}
+              {isLoadingMyPageWrong && <p>読み込み中です…</p>}
               {!isLoadingMyPageWrong &&
-                (!myPageWrongItems ||
-                  myPageWrongItems.length === 0) && (
+                (!myPageWrongItems || myPageWrongItems.length === 0) && (
                   <p
                     style={{
                       fontSize: '0.9rem',
@@ -2786,11 +2743,8 @@ function App() {
                         >
                           {word ? (
                             <>
-                              <strong>
-                                {word.english}
-                              </strong>{' '}
-                              / {word.japanese}（間違え{' '}
-                              {stat.wrong_total} 回 / 正解{' '}
+                              <strong>{word.english}</strong> / {word.japanese}
+                              （間違え {stat.wrong_total} 回 / 正解{' '}
                               {stat.correct_total} 回）
                             </>
                           ) : (
