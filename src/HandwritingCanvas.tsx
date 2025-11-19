@@ -13,11 +13,15 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
   const isDrawingRef = useRef(false);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
 
-  // キャンバスのリサイズ（Retina 対応）
-  const resizeCanvas = () => {
+  const isTouchDeviceRef = useRef(false);
+
+  const setupContext = () => {
     const canvas = canvasRef.current;
-    const ctx = ctxRef.current;
-    if (!canvas || !ctx) return;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctxRef.current = ctx;
 
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -25,8 +29,7 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
     canvas.width = rect.width * dpr;
     canvas.height = rect.height * dpr;
 
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // px 座標で描けるように
-
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.lineWidth = 3;
@@ -37,101 +40,155 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext('2d');
+    isTouchDeviceRef.current =
+      'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+    setupContext();
+
+    const ctx = ctxRef.current;
     if (!ctx) return;
-    ctxRef.current = ctx;
 
-    resizeCanvas();
-
-    const handlePointerDown = (e: PointerEvent) => {
-      // マウスは左クリックのみ、ペン・タッチはそのまま
-      if (e.pointerType === 'mouse' && e.buttons !== 1) return;
-
-      e.preventDefault();
-
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-
+    // ---- 共通：ストローク処理 -----------------------------------
+    const beginStroke = (x: number, y: number) => {
       isDrawingRef.current = true;
       lastPointRef.current = { x, y };
-
-      try {
-        canvas.setPointerCapture(e.pointerId);
-      } catch {
-        // Safari で失敗することもあるので握りつぶす
-      }
-
       ctx.beginPath();
       ctx.moveTo(x, y);
     };
 
-    const handlePointerMove = (e: PointerEvent) => {
+    const extendStroke = (x: number, y: number) => {
       if (!isDrawingRef.current) return;
-
-      e.preventDefault();
-
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-
       const last = lastPointRef.current;
       if (!last) {
         lastPointRef.current = { x, y };
         return;
       }
-
       ctx.beginPath();
       ctx.moveTo(last.x, last.y);
       ctx.lineTo(x, y);
       ctx.stroke();
-
       lastPointRef.current = { x, y };
     };
 
-    const handlePointerUpOrCancel = (e: PointerEvent) => {
+    const endStroke = () => {
+      isDrawingRef.current = false;
+      lastPointRef.current = null;
+    };
+
+    // ---- touch（iPad 等） ----------------------------------------
+    const handleTouchStart = (e: TouchEvent) => {
+      e.preventDefault();
+
+      const rect = canvas.getBoundingClientRect();
+      // Apple Pencil なら touchType === 'stylus' が入るブラウザもある
+      const touches = e.touches.length ? e.touches : e.changedTouches;
+      if (!touches.length) return;
+
+      let t = touches[0];
+      for (let i = 0; i < touches.length; i++) {
+        const tt = touches[i] as any;
+        if (tt.touchType === 'stylus') {
+          t = touches[i];
+          break;
+        }
+      }
+
+      const x = t.clientX - rect.left;
+      const y = t.clientY - rect.top;
+      beginStroke(x, y);
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
       if (!isDrawingRef.current) return;
       e.preventDefault();
 
-      isDrawingRef.current = false;
-      lastPointRef.current = null;
+      const rect = canvas.getBoundingClientRect();
+      const touches = e.touches.length ? e.touches : e.changedTouches;
+      if (!touches.length) return;
 
-      try {
-        canvas.releasePointerCapture(e.pointerId);
-      } catch {
-        // 無視
+      let t = touches[0];
+      for (let i = 0; i < touches.length; i++) {
+        const tt = touches[i] as any;
+        if (tt.touchType === 'stylus') {
+          t = touches[i];
+          break;
+        }
       }
+
+      const x = t.clientX - rect.left;
+      const y = t.clientY - rect.top;
+      extendStroke(x, y);
     };
 
-    // passive: false を指定して preventDefault を効かせる
-    canvas.addEventListener('pointerdown', handlePointerDown, {
-      passive: false,
-    });
-    canvas.addEventListener('pointermove', handlePointerMove, {
-      passive: false,
-    });
-    canvas.addEventListener('pointerup', handlePointerUpOrCancel, {
-      passive: false,
-    });
-    canvas.addEventListener('pointercancel', handlePointerUpOrCancel, {
-      passive: false,
-    });
-    canvas.addEventListener('pointerleave', handlePointerUpOrCancel, {
-      passive: false,
-    });
+    const handleTouchEnd = (e: TouchEvent) => {
+      if (!isDrawingRef.current) return;
+      e.preventDefault();
+      endStroke();
+    };
 
-    // リサイズ時も再スケール
+    // ---- mouse（PC） ---------------------------------------------
+    const handleMouseDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      beginStroke(x, y);
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDrawingRef.current) return;
+      e.preventDefault();
+
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      extendStroke(x, y);
+    };
+
+    const handleMouseUp = (e: MouseEvent) => {
+      if (!isDrawingRef.current) return;
+      e.preventDefault();
+      endStroke();
+    };
+
+    // ---- イベント登録 --------------------------------------------
+    if (isTouchDeviceRef.current) {
+      canvas.addEventListener('touchstart', handleTouchStart, {
+        passive: false,
+      });
+      canvas.addEventListener('touchmove', handleTouchMove, {
+        passive: false,
+      });
+      canvas.addEventListener('touchend', handleTouchEnd, {
+        passive: false,
+      });
+      canvas.addEventListener('touchcancel', handleTouchEnd, {
+        passive: false,
+      });
+    } else {
+      canvas.addEventListener('mousedown', handleMouseDown);
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+    }
+
     const handleResize = () => {
-      resizeCanvas();
+      setupContext();
     };
     window.addEventListener('resize', handleResize);
 
     return () => {
-      canvas.removeEventListener('pointerdown', handlePointerDown);
-      canvas.removeEventListener('pointermove', handlePointerMove);
-      canvas.removeEventListener('pointerup', handlePointerUpOrCancel);
-      canvas.removeEventListener('pointercancel', handlePointerUpOrCancel);
-      canvas.removeEventListener('pointerleave', handlePointerUpOrCancel);
+      if (isTouchDeviceRef.current) {
+        canvas.removeEventListener('touchstart', handleTouchStart);
+        canvas.removeEventListener('touchmove', handleTouchMove);
+        canvas.removeEventListener('touchend', handleTouchEnd);
+        canvas.removeEventListener('touchcancel', handleTouchEnd);
+      } else {
+        canvas.removeEventListener('mousedown', handleMouseDown);
+        window.removeEventListener('mousemove', handleMouseMove);
+        window.removeEventListener('mouseup', handleMouseUp);
+      }
       window.removeEventListener('resize', handleResize);
     };
   }, []);
@@ -150,15 +207,13 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
         borderRadius: 4,
         padding: 4,
         background: '#fff',
-        touchAction: 'none', // ジェスチャー無効
+        touchAction: 'none',
         userSelect: 'none',
         WebkitUserSelect: 'none',
       }}
     >
       <canvas
         ref={canvasRef}
-        // width / height は CSS ではなく、実際の描画サイズと連動させたいので
-        // 実際のピクセルは useEffect 内の resizeCanvas で設定
         style={{
           width: '100%',
           height: `${height}px`,
