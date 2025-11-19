@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
 
 type HandwritingCanvasProps = {
   height?: number;
@@ -8,106 +8,140 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
   height = 160,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [isDrawing, setIsDrawing] = useState(false);
+  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
+
+  const isDrawingRef = useRef(false);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
 
-  // キャンバス内の座標に変換
-  const getPos = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    return {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
-    };
-  };
+  // キャンバスのリサイズ（Retina 対応）
+  const resizeCanvas = () => {
+    const canvas = canvasRef.current;
+    const ctx = ctxRef.current;
+    if (!canvas || !ctx) return;
 
-  const setupContext = (canvas: HTMLCanvasElement): CanvasRenderingContext2D | null => {
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
 
-    // 線のスタイル
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // px 座標で描けるように
+
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.lineWidth = 3;
     ctx.strokeStyle = '#000';
-    return ctx;
   };
 
-  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    // マウスの場合は左クリックのみ許可
-    if (e.pointerType === 'mouse' && e.buttons !== 1) return;
-
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    e.preventDefault();
-
-    const ctx = setupContext(canvas);
+    const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    ctxRef.current = ctx;
 
-    // このポインタをキャンバスにキャプチャ
-    canvas.setPointerCapture(e.pointerId);
+    resizeCanvas();
 
-    const { x, y } = getPos(e);
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    lastPointRef.current = { x, y };
-    setIsDrawing(true);
-  };
+    const handlePointerDown = (e: PointerEvent) => {
+      // マウスは左クリックのみ、ペン・タッチはそのまま
+      if (e.pointerType === 'mouse' && e.buttons !== 1) return;
 
-  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
+      e.preventDefault();
 
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
 
-    e.preventDefault();
+      isDrawingRef.current = true;
+      lastPointRef.current = { x, y };
 
-    const ctx = setupContext(canvas);
-    if (!ctx) return;
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {
+        // Safari で失敗することもあるので握りつぶす
+      }
 
-    const { x, y } = getPos(e);
-    const last = lastPointRef.current;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+    };
 
-    if (!last) {
+    const handlePointerMove = (e: PointerEvent) => {
+      if (!isDrawingRef.current) return;
+
+      e.preventDefault();
+
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      const last = lastPointRef.current;
+      if (!last) {
+        lastPointRef.current = { x, y };
+        return;
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(last.x, last.y);
       ctx.lineTo(x, y);
       ctx.stroke();
+
       lastPointRef.current = { x, y };
-      return;
-    }
+    };
 
-    ctx.beginPath();
-    ctx.moveTo(last.x, last.y);
-    ctx.lineTo(x, y);
-    ctx.stroke();
+    const handlePointerUpOrCancel = (e: PointerEvent) => {
+      if (!isDrawingRef.current) return;
+      e.preventDefault();
 
-    lastPointRef.current = { x, y };
-  };
+      isDrawingRef.current = false;
+      lastPointRef.current = null;
 
-  const stopDrawing = (e?: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
-    const canvas = canvasRef.current;
-    if (canvas && e) {
       try {
         canvas.releasePointerCapture(e.pointerId);
       } catch {
-        // ignore
+        // 無視
       }
-    }
-    setIsDrawing(false);
-    lastPointRef.current = null;
-  };
+    };
+
+    // passive: false を指定して preventDefault を効かせる
+    canvas.addEventListener('pointerdown', handlePointerDown, {
+      passive: false,
+    });
+    canvas.addEventListener('pointermove', handlePointerMove, {
+      passive: false,
+    });
+    canvas.addEventListener('pointerup', handlePointerUpOrCancel, {
+      passive: false,
+    });
+    canvas.addEventListener('pointercancel', handlePointerUpOrCancel, {
+      passive: false,
+    });
+    canvas.addEventListener('pointerleave', handlePointerUpOrCancel, {
+      passive: false,
+    });
+
+    // リサイズ時も再スケール
+    const handleResize = () => {
+      resizeCanvas();
+    };
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      canvas.removeEventListener('pointerdown', handlePointerDown);
+      canvas.removeEventListener('pointermove', handlePointerMove);
+      canvas.removeEventListener('pointerup', handlePointerUpOrCancel);
+      canvas.removeEventListener('pointercancel', handlePointerUpOrCancel);
+      canvas.removeEventListener('pointerleave', handlePointerUpOrCancel);
+      window.removeEventListener('resize', handleResize);
+    };
+  }, []);
 
   const handleClear = () => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const ctx = ctxRef.current;
+    if (!canvas || !ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
   };
-
-  // Retina 対応などをきっちりやるなら useEffect で DPR を考慮しますが、
-  // ひとまずシンプルに width=800 を 100% 表示にしています。
-  const canvasHeight = height;
 
   return (
     <div
@@ -116,25 +150,23 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
         borderRadius: 4,
         padding: 4,
         background: '#fff',
-        touchAction: 'none', // ← スクロールなどのジェスチャー無効
-        userSelect: 'none',  // ← テキスト選択無効
+        touchAction: 'none', // ジェスチャー無効
+        userSelect: 'none',
+        WebkitUserSelect: 'none',
       }}
     >
       <canvas
         ref={canvasRef}
-        width={800}
-        height={canvasHeight}
+        // width / height は CSS ではなく、実際の描画サイズと連動させたいので
+        // 実際のピクセルは useEffect 内の resizeCanvas で設定
         style={{
           width: '100%',
+          height: `${height}px`,
           display: 'block',
-          touchAction: 'none', // iPad での描画に重要
+          touchAction: 'none',
           userSelect: 'none',
+          WebkitUserSelect: 'none',
         }}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={stopDrawing}
-        onPointerCancel={stopDrawing}
-        onPointerLeave={stopDrawing}
       />
       <div style={{ textAlign: 'right', marginTop: 4 }}>
         <button
