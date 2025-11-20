@@ -13,6 +13,7 @@ const CLIENT_ID =
 declare global {
   interface Window {
     google?: any;
+    [key: string]: any;
   }
 }
 
@@ -20,11 +21,11 @@ declare global {
    型
 ================================ */
 type WordItem = {
-  id: number; // ItemID
-  book: string; // bookId
-  deck: string; // setId(core/bonus/...)
+  id: number;
+  book: string;
+  deck: string;
   bookIndex: number;
-  level?: string; // "600" etc
+  level?: string;
   subCategory?: string;
   english: string;
   japanese: string;
@@ -98,34 +99,48 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 /* ================================
-   JSON / JSONP GET 対応
-   - Code.gs doGet は JSONP で返すため
+   JSONP GET（CORS回避で必須）
 ================================ */
-function parseJsonpOrJson(text: string) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    const m = text.match(/^[^(]*\((.*)\)\s*;?\s*$/s);
-    if (!m) throw new Error("Invalid JSONP response");
-    return JSON.parse(m[1]);
-  }
-}
-
-async function apiGet<T>(
+function apiGet<T>(
   action: string,
   params: Record<string, any> = {}
 ): Promise<T> {
-  const url = new URL(API_URL);
-  url.searchParams.set("action", action);
-  url.searchParams.set("callback", "__cb");
-  Object.keys(params).forEach((k) => url.searchParams.set(k, String(params[k])));
+  return new Promise((resolve, reject) => {
+    const cbName = "__cb_" + Math.random().toString(36).slice(2);
 
-  const res = await fetch(url.toString(), { method: "GET" });
-  if (!res.ok) throw new Error(`GET ${action} failed`);
-  const text = await res.text();
-  return parseJsonpOrJson(text) as T;
+    const url = new URL(API_URL);
+    url.searchParams.set("action", action);
+    url.searchParams.set("callback", cbName);
+    Object.keys(params).forEach((k) =>
+      url.searchParams.set(k, String(params[k]))
+    );
+
+    const script = document.createElement("script");
+    script.src = url.toString();
+    script.async = true;
+
+    window[cbName] = (data: T) => {
+      try {
+        resolve(data);
+      } finally {
+        delete window[cbName];
+        script.remove();
+      }
+    };
+
+    script.onerror = () => {
+      delete window[cbName];
+      script.remove();
+      reject(new Error(`JSONP GET failed: ${action}`));
+    };
+
+    document.body.appendChild(script);
+  });
 }
 
+/* ================================
+   POST（GAS doPost）
+================================ */
 async function apiPost<T>(
   action: string,
   body: Record<string, any>
@@ -170,7 +185,7 @@ function useSimpleFullscreen<T extends HTMLElement>() {
 }
 
 /* ================================
-   Handwrite Canvas (Pen only)
+   手書き（高性能版へ復帰）
 ================================ */
 type Point = { x: number; y: number; pressure: number; t: number };
 type Stroke = Point[];
@@ -212,7 +227,7 @@ function HandwriteBox({
         const p1 = s[i + 1];
         const mx = (p0.x + p1.x) / 2;
         const my = (p0.y + p1.y) / 2;
-        const w = Math.max(1.2, 2.5 * (p0.pressure || 0.5));
+        const w = Math.max(1.2, 2.8 * (p0.pressure || 0.5));
         ctx.lineWidth = w;
         ctx.quadraticCurveTo(p0.x, p0.y, mx, my);
       }
@@ -247,10 +262,12 @@ function HandwriteBox({
     const resize = () => {
       const rect = canvas.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
-      const ctx = canvas.getContext("2d")!;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      const w = rect.width * dpr;
+      const h = rect.height * dpr;
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
       requestRedraw();
     };
 
@@ -282,8 +299,7 @@ function HandwriteBox({
 
   const exportDataUrl = () => {
     const canvas = canvasRef.current!;
-    const dataUrl = canvas.toDataURL("image/png");
-    onChangeDataUrl?.(dataUrl);
+    onChangeDataUrl?.(canvas.toDataURL("image/png"));
   };
 
   const clear = () => {
@@ -312,7 +328,10 @@ function HandwriteBox({
     e.preventDefault();
 
     const canvas = canvasRef.current!;
-    curRef.current!.push(getLocalPoint(e.nativeEvent, canvas));
+    const evs = e.nativeEvent.getCoalescedEvents?.() || [e.nativeEvent];
+    evs.forEach((ev: PointerEvent) => {
+      curRef.current!.push(getLocalPoint(ev, canvas));
+    });
     requestRedraw();
   };
 
@@ -322,7 +341,11 @@ function HandwriteBox({
     e.preventDefault();
 
     const canvas = canvasRef.current!;
-    canvas.releasePointerCapture(e.pointerId);
+    try {
+      canvas.releasePointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
 
     isDrawingRef.current = false;
     if (curRef.current && curRef.current.length > 1) {
@@ -342,6 +365,8 @@ function HandwriteBox({
         padding: 6,
         position: "relative",
         touchAction: "pan-y",
+        userSelect: "none",
+        WebkitUserSelect: "none",
       }}
     >
       <canvas
@@ -377,7 +402,7 @@ function HandwriteBox({
 }
 
 /* ================================
-   JWT デコード（Google credential）
+   JWT デコード
 ================================ */
 const decodeJwtPayload = (jwt: string) => {
   const base64Url = jwt.split(".")[1];
@@ -396,7 +421,7 @@ const decodeJwtPayload = (jwt: string) => {
 ================================ */
 export default function App() {
   /* ------------------------------
-     端末向き/背景
+     端末向き/背景（iPad文字バグ対策でフォント/色を明示）
   ------------------------------ */
   const [isPortrait, setIsPortrait] = useState(
     window.innerHeight >= window.innerWidth
@@ -418,6 +443,9 @@ export default function App() {
     alignItems: "flex-start",
     background:
       "linear-gradient(135deg, #0ea5e9 0%, #6366f1 50%, #a855f7 100%)",
+    fontFamily:
+      '"Noto Sans JP", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
+    color: "#111827",
   };
 
   const containerStyle: CSSProperties = {
@@ -426,7 +454,7 @@ export default function App() {
   };
 
   /* ------------------------------
-     ログイン関連
+     ログイン
   ------------------------------ */
   const [user, setUser] = useState<User | null>(null);
   const [loginReady, setLoginReady] = useState(false);
@@ -446,6 +474,53 @@ export default function App() {
     script.onload = () => setLoginReady(true);
     document.body.appendChild(script);
   }, []);
+
+  /* ------------------------------
+     設定（ローカル + サーバ同期）
+  ------------------------------ */
+  const [settings, setSettings] = useState<Settings>(() => {
+    const s = localStorage.getItem("settings_json");
+    return s ? (JSON.parse(s) as Settings) : DEFAULT_SETTINGS;
+  });
+  const settingsSyncReadyRef = useRef(false);
+
+  useEffect(() => {
+    localStorage.setItem("settings_json", JSON.stringify(settings));
+  }, [settings]);
+
+  // login時にサーバの settings_json を読み込む
+  const loadSettingsFromServer = async (userId: string) => {
+    try {
+      const r = await apiGet<{ ok: boolean; settings: any }>(
+        "getUserSettings",
+        { userId }
+      );
+      if (r.ok && r.settings) {
+        const merged = { ...DEFAULT_SETTINGS, ...r.settings };
+        setSettings(merged);
+        localStorage.setItem("settings_json", JSON.stringify(merged));
+      }
+    } catch (e) {
+      console.warn("getUserSettings failed", e);
+    } finally {
+      settingsSyncReadyRef.current = true;
+    }
+  };
+
+  // settings変更時にサーバへ保存（デバウンス）
+  useEffect(() => {
+    if (!user) return;
+    if (!settingsSyncReadyRef.current) return;
+
+    const t = setTimeout(() => {
+      apiPost("saveUserSettings", {
+        userId: user.user_id,
+        settings,
+      }).catch((e) => console.warn("saveUserSettings failed", e));
+    }, 500);
+
+    return () => clearTimeout(t);
+  }, [settings, user]);
 
   useEffect(() => {
     if (!loginReady || user) return;
@@ -469,12 +544,16 @@ export default function App() {
           });
           if (!out.ok) throw new Error("upsertUser failed");
 
-          setUser({
+          const newUser: User = {
             user_id: userId,
             display_name: displayName,
             weekly_correct_total: 0,
             email,
-          });
+          };
+          setUser(newUser);
+
+          // ★設定をサーバから復元
+          await loadSettingsFromServer(userId);
         } catch (e) {
           console.error("google login failed", e);
         }
@@ -491,9 +570,7 @@ export default function App() {
   }, [loginReady, user]);
 
   /* ------------------------------
-     単語データ読み込み（重要）
-     public/words_gold.json を最優先で読む
-     - GitHub Pages の base path でもOK
+     単語データ読み込み（subCategory正規化）
   ------------------------------ */
   const [books, setBooks] = useState<Book[]>([]);
   const [loadingWords, setLoadingWords] = useState(false);
@@ -505,16 +582,16 @@ export default function App() {
       setWordsError(null);
       try {
         const base = (import.meta as any).env?.BASE_URL || "/";
-        const url = base.endsWith("/") ? base + "words_gold.json" : base + "/words_gold.json";
+        const url = base.endsWith("/")
+          ? base + "words_gold.json"
+          : base + "/words_gold.json";
 
         const res = await fetch(url, { cache: "no-store" });
-        if (!res.ok) throw new Error(`words_gold.json fetch failed: ${res.status}`);
+        if (!res.ok)
+          throw new Error(`words_gold.json fetch failed: ${res.status}`);
 
         const json = await res.json();
 
-        // 以前の変換ルールに合わせて柔軟に対応
-        // - {books:[...]} 形式
-        // - 単一Bookオブジェクト形式（あなたのwords_gold.jsonはこれ）
         let loaded: Book[] = [];
         if (Array.isArray(json.books)) {
           loaded = json.books;
@@ -523,6 +600,29 @@ export default function App() {
         } else {
           throw new Error("words_gold.json format mismatch");
         }
+
+        // ★ subCategory 正規化（昔動いてた方式に合わせる）
+        loaded.forEach((b) => {
+          Object.values(b.decks).forEach((d) => {
+            d.items = d.items.map((it: any) => {
+              const sc =
+                it.subCategory ??
+                it.sub_category ??
+                it.subcategory ??
+                (() => {
+                  const tag = (it.tags || []).find((t: string) =>
+                    t.startsWith("sub:")
+                  );
+                  return tag ? tag.replace("sub:", "") : undefined;
+                })();
+
+              return {
+                ...it,
+                subCategory: sc,
+              } as WordItem;
+            });
+          });
+        });
 
         setBooks(loaded);
       } catch (e: any) {
@@ -534,18 +634,6 @@ export default function App() {
       }
     })();
   }, []);
-
-  /* ------------------------------
-     設定
-  ------------------------------ */
-  const [settings, setSettings] = useState<Settings>(() => {
-    const s = localStorage.getItem("settings_json");
-    return s ? (JSON.parse(s) as Settings) : DEFAULT_SETTINGS;
-    });
-
-  useEffect(() => {
-    localStorage.setItem("settings_json", JSON.stringify(settings));
-  }, [settings]);
 
   /* ------------------------------
      Book/Set選択
@@ -594,7 +682,7 @@ export default function App() {
   const [showMyPage, setShowMyPage] = useState(false);
 
   /* ------------------------------
-     MyPage（Code.gs 対応）
+     MyPage（JSONP GET復活で動く）
   ------------------------------ */
   const [wrongItems, setWrongItems] = useState<WrongItem[]>([]);
   const [overview, setOverview] = useState<UserOverview | null>(null);
@@ -649,7 +737,7 @@ export default function App() {
   };
 
   /* ------------------------------
-     テスト設定（出題設定）
+     テスト設定
   ------------------------------ */
   const [testMode, setTestMode] = useState<"level" | "number">("level");
   const [level, setLevel] = useState<string>("600");
@@ -779,7 +867,7 @@ export default function App() {
   };
 
   /* ------------------------------
-     単語カード
+     単語カード設定（UI復活）
   ------------------------------ */
   const [cardsStarted, setCardsStarted] = useState(false);
   const [cardMode, setCardMode] = useState<"level" | "number">("level");
@@ -787,6 +875,7 @@ export default function App() {
   const [cardRangeStart, setCardRangeStart] = useState(1);
   const [cardRangeEnd, setCardRangeEnd] = useState(1000);
   const [cardSubCat, setCardSubCat] = useState("all");
+  const [cardMistakeOnly, setCardMistakeOnly] = useState(false);
 
   useEffect(() => {
     if (!isCoreSelected && cardMode === "number") setCardMode("level");
@@ -795,9 +884,12 @@ export default function App() {
   const [cardsList, setCardsList] = useState<WordItem[]>([]);
   const [cardIndex, setCardIndex] = useState(0);
   const [cardSide, setCardSide] = useState<"front" | "back">("front");
+  const cardFs = useSimpleFullscreen<HTMLDivElement>();
 
   const buildCardsList = () => {
     let list = [...allItems];
+
+    if (cardMistakeOnly) list = list.filter((it) => weakItemIds.has(it.id));
 
     if (isCoreSelected) {
       if (cardMode === "level") {
@@ -928,7 +1020,7 @@ export default function App() {
   };
 
   /* ------------------------------
-     UI（ログイン前）
+     ログイン前UI
   ------------------------------ */
   if (!user) {
     return (
@@ -954,7 +1046,7 @@ export default function App() {
   }
 
   /* ------------------------------
-     UI（ログイン後）
+     ログイン後UI
   ------------------------------ */
   return (
     <div style={shellStyle}>
@@ -962,7 +1054,7 @@ export default function App() {
         {/* ヘッダー */}
         <header
           style={{
-            background: "rgba(255,255,255,0.95)",
+            background: "rgba(255,255,255,0.96)",
             borderRadius: 14,
             padding: "10px 12px",
             display: "flex",
@@ -973,7 +1065,6 @@ export default function App() {
           }}
         >
           <div style={{ fontWeight: 800, fontSize: 20 }}>📘 Vocab Sprint</div>
-
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <button
               onClick={() => setShowSettings(true)}
@@ -1025,7 +1116,7 @@ export default function App() {
         {/* メイン */}
         <main
           style={{
-            background: "rgba(255,255,255,0.96)",
+            background: "rgba(255,255,255,0.97)",
             borderRadius: 14,
             padding: isPortrait ? 10 : 14,
             boxShadow: "0 6px 18px rgba(0,0,0,0.12)",
@@ -1038,6 +1129,9 @@ export default function App() {
             </div>
           )}
 
+          {/* ==========================
+              テストタブ
+          ========================== */}
           {!loadingWords && activeTab === "test" && (
             <>
               {!testStarted && (
@@ -1244,7 +1338,7 @@ export default function App() {
                           <input
                             type="text"
                             placeholder="日本語で答える"
-                            style={{ width: "100%", padding: 8 }}
+                            style={{ width: "100%", padding: 8, fontSize: 16 }}
                             value={answersText[q.id] || ""}
                             onChange={(e) =>
                               setAnswersText({
@@ -1378,18 +1472,258 @@ export default function App() {
             </>
           )}
 
-          {/* 単語カード側は前の版と同じなので省略せず保持 */}
+          {/* ==========================
+              単語カードタブ
+          ========================== */}
           {!loadingWords && activeTab === "cards" && (
-            <div>
-              {/* ここ以降は前の版と同一（変更なし） */}
-              {/* ---（長いので略さず、あなたの現行版と同じ）--- */}
-              {/* 省略せずに動かしたいならこのまま貼り替えてOK */}
-              {/* ※単語データ読み込みは上の useEffect で復活済み */}
-            </div>
+            <>
+              {!cardsStarted && (
+                <section style={{ marginBottom: 12 }}>
+                  <h2 style={{ fontSize: 18, marginBottom: 6 }}>🃏 カード設定</h2>
+                  <div style={{ display: "grid", gap: 8 }}>
+                    <label>
+                      単語帳：
+                      <select
+                        value={selectedBookId}
+                        onChange={(e) => {
+                          setSelectedBookId(e.target.value);
+                          const b = books.find(
+                            (x) => x.bookId === e.target.value
+                          );
+                          const first = b ? Object.keys(b.decks)[0] : "core";
+                          setSelectedSetId(first);
+                        }}
+                      >
+                        {books.map((b) => (
+                          <option key={b.bookId} value={b.bookId}>
+                            {b.bookName}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label>
+                      セット：
+                      <select
+                        value={selectedSetId}
+                        onChange={(e) => setSelectedSetId(e.target.value)}
+                      >
+                        {selectedBook &&
+                          Object.values(selectedBook.decks).map((d) => (
+                            <option key={d.id} value={d.id}>
+                              {d.id === "core" ? "本編" : d.labelJa}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+
+                    {isCoreSelected ? (
+                      <>
+                        <label>
+                          範囲指定：
+                          <select
+                            value={cardMode}
+                            onChange={(e) =>
+                              setCardMode(e.target.value as any)
+                            }
+                          >
+                            <option value="level">レベル別</option>
+                            <option value="number">番号範囲</option>
+                          </select>
+                        </label>
+
+                        {cardMode === "level" ? (
+                          <label>
+                            レベル：
+                            <select
+                              value={cardLevel}
+                              onChange={(e) => setCardLevel(e.target.value)}
+                            >
+                              {["600", "730", "860", "990"].map((lv) => (
+                                <option key={lv} value={lv}>
+                                  {lv}点
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : (
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <label style={{ flex: 1 }}>
+                              範囲開始：
+                              <input
+                                type="number"
+                                value={cardRangeStart}
+                                min={1}
+                                max={1000}
+                                onChange={(e) =>
+                                  setCardRangeStart(Number(e.target.value))
+                                }
+                              />
+                            </label>
+                            <label style={{ flex: 1 }}>
+                              範囲終了：
+                              <input
+                                type="number"
+                                value={cardRangeEnd}
+                                min={1}
+                                max={1000}
+                                onChange={(e) =>
+                                  setCardRangeEnd(Number(e.target.value))
+                                }
+                              />
+                            </label>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <label>
+                        サブカテゴリ：
+                        <select
+                          value={cardSubCat}
+                          onChange={(e) => setCardSubCat(e.target.value)}
+                        >
+                          {subCategoryList.map((s) => (
+                            <option key={s} value={s}>
+                              {s === "all" ? "すべて" : s}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
+
+                    <label>
+                      間違えた単語だけ：
+                      <input
+                        type="checkbox"
+                        checked={cardMistakeOnly}
+                        onChange={(e) => setCardMistakeOnly(e.target.checked)}
+                        style={{ marginLeft: 6 }}
+                      />
+                    </label>
+
+                    <button
+                      onClick={startCards}
+                      style={{
+                        marginTop: 6,
+                        padding: "10px 0",
+                        borderRadius: 12,
+                        fontWeight: 800,
+                        background: "#111827",
+                        color: "#fff",
+                      }}
+                    >
+                      🃏 カード開始
+                    </button>
+
+                    <div style={{ fontSize: 12, color: "#555" }}>
+                      想定カード数：{buildCardsList().length} 枚
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {cardsStarted && currentCard && (
+                <section ref={cardFs.ref}>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginBottom: 8,
+                    }}
+                  >
+                    <div style={{ fontWeight: 700 }}>
+                      {cardIndex + 1}/{cardsList.length}
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      {cardFs.supportsFs && (
+                        <button
+                          onClick={() =>
+                            cardFs.isFs ? cardFs.exit() : cardFs.enter()
+                          }
+                        >
+                          {cardFs.isFs ? "全画面解除" : "全画面"}
+                        </button>
+                      )}
+                      <button onClick={openDrive}>🚗 ドライブモード</button>
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      padding: 16,
+                      borderRadius: 14,
+                      border: "1px solid #e5e7eb",
+                      background: "#fff",
+                      textAlign: "center",
+                      minHeight: cardFs.isFs ? "70vh" : 220,
+                      display: "grid",
+                      placeItems: "center",
+                      fontSize: cardFs.isFs ? 52 : 28,
+                      fontWeight: 800,
+                    }}
+                    onClick={() =>
+                      setCardSide((s) => (s === "front" ? "back" : "front"))
+                    }
+                  >
+                    {cardSide === "front"
+                      ? currentCard.english
+                      : currentCard.japanese}
+                  </div>
+
+                  <div
+                    style={{
+                      marginTop: 10,
+                      display: "flex",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <button
+                      onClick={() => {
+                        setCardIndex((i) =>
+                          i > 0 ? i - 1 : cardsList.length - 1
+                        );
+                        setCardSide("front");
+                      }}
+                    >
+                      ← 前
+                    </button>
+
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button
+                        onClick={() =>
+                          speak(currentCard.english, "en-US")
+                        }
+                      >
+                        🔊 英語
+                      </button>
+                      <button
+                        onClick={() =>
+                          speak(currentCard.japanese, "ja-JP")
+                        }
+                      >
+                        🔊 日本語
+                      </button>
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        setCardIndex((i) =>
+                          i < cardsList.length - 1 ? i + 1 : 0
+                        );
+                        setCardSide("front");
+                      }}
+                    >
+                      次 →
+                    </button>
+                  </div>
+                </section>
+              )}
+            </>
           )}
         </main>
 
-        {/* 設定モーダル / マイページモーダルも前の版と同じなのでそのまま */}
+        {/* 設定モーダル */}
         {showSettings && (
           <Modal onClose={() => setShowSettings(false)} title="⚙️ 設定">
             <div style={{ display: "grid", gap: 10 }}>
@@ -1462,6 +1796,41 @@ export default function App() {
                 </select>
               </label>
 
+              <label>
+                ドライブ速度：
+                <input
+                  type="range"
+                  min={0.6}
+                  max={1.4}
+                  step={0.1}
+                  value={settings.driveRate}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      driveRate: Number(e.target.value),
+                    })
+                  }
+                />
+                {settings.driveRate.toFixed(1)}x
+              </label>
+
+              <label>
+                ドライブの次表示までの待ち(ms)：
+                <input
+                  type="number"
+                  min={200}
+                  max={3000}
+                  step={100}
+                  value={settings.driveDelayMs}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      driveDelayMs: Number(e.target.value),
+                    })
+                  }
+                />
+              </label>
+
               <div>
                 <div style={{ fontWeight: 700, marginBottom: 4 }}>
                   ドライブモードの表示順
@@ -1500,6 +1869,7 @@ export default function App() {
           </Modal>
         )}
 
+        {/* マイページモーダル */}
         {showMyPage && (
           <Modal onClose={() => setShowMyPage(false)} title="👤 マイページ">
             {loadingMyPage && <div>読み込み中...</div>}
@@ -1557,6 +1927,92 @@ export default function App() {
               </div>
             )}
           </Modal>
+        )}
+
+        {/* ドライブモード overlay */}
+        {driveOpen && currentCard && (
+          <div
+            ref={driveFs.ref}
+            onClick={() => setDriveOpen(false)}
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.9)",
+              display: "grid",
+              placeItems: "center",
+              zIndex: 99999,
+              color: "#fff",
+              padding: 16,
+            }}
+          >
+            <div
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                width: "100%",
+                maxWidth: 900,
+                textAlign: "center",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: driveFs.isFs ? "min(12vw, 88px)" : 44,
+                  fontWeight: 900,
+                  lineHeight: 1.2,
+                  marginBottom: 16,
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {getFieldText(currentCard, driveFields[driveFieldIndex])}
+              </div>
+
+              <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                <button
+                  onClick={() => setDrivePlaying((p) => !p)}
+                  style={{ padding: "8px 14px", fontWeight: 800 }}
+                >
+                  {drivePlaying ? "⏸ 停止" : "▶ 再生"}
+                </button>
+                <button
+                  onClick={() => {
+                    setDriveFieldIndex(0);
+                    setCardIndex((i) =>
+                      i > 0 ? i - 1 : cardsList.length - 1
+                    );
+                  }}
+                  style={{ padding: "8px 14px", fontWeight: 800 }}
+                >
+                  ⏮ 前
+                </button>
+                <button
+                  onClick={() => {
+                    setDriveFieldIndex(0);
+                    setCardIndex((i) =>
+                      i < cardsList.length - 1 ? i + 1 : 0
+                    );
+                  }}
+                  style={{ padding: "8px 14px", fontWeight: 800 }}
+                >
+                  ⏭ 次
+                </button>
+                {driveFs.supportsFs && (
+                  <button
+                    onClick={() =>
+                      driveFs.isFs ? driveFs.exit() : driveFs.enter()
+                    }
+                    style={{ padding: "8px 14px", fontWeight: 800 }}
+                  >
+                    {driveFs.isFs ? "全画面解除" : "全画面"}
+                  </button>
+                )}
+                <button
+                  onClick={() => setDriveOpen(false)}
+                  style={{ padding: "8px 14px", fontWeight: 800 }}
+                >
+                  ✖ 閉じる
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>
@@ -1628,7 +2084,7 @@ function NameEditor({
       <input
         value={v}
         onChange={(e) => setV(e.target.value)}
-        style={{ flex: 1, padding: 8 }}
+        style={{ flex: 1, padding: 8, fontSize: 16 }}
       />
       <button onClick={() => onSave(v)} style={{ fontWeight: 800 }}>
         保存
