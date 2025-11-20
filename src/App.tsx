@@ -1,73 +1,145 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
-import HandwritingCanvas from "./HandwritingCanvas";
+import { useEffect, useRef, useState } from 'react';
+import HandwritingCanvas from './HandwritingCanvas';
 
-/* ================================
-   設定
-================================ */
-const API_URL =
-  "https://script.google.com/macros/s/AKfycbw5_IGof9wirpNIhkBNEPxh8kwsLKFqaSRWwQumQ2z5xqt5YspochMmccRtfE4fD2ZQSg/exec";
+const GAS_ENDPOINT =
+  'https://script.google.com/macros/s/AKfycbw5_IGof9wirpNIhkBNEPxh8kwsLKFqaSRWwQumQ2z5xqt5YspochMmccRtfE4fD2ZQSg/exec';
 
-const CLIENT_ID =
-  "141623918894-f9kmkrrk7640lqhupp25nfhcog2jihim.apps.googleusercontent.com";
+const GOOGLE_CLIENT_ID =
+  '141623918894-f9kmkrrk7640lqhupp25nfhcog2jihim.apps.googleusercontent.com';
 
 declare global {
   interface Window {
     google?: any;
-    [key: string]: any;
+    [key: string]: any; // JSONP 用
   }
 }
 
-/* ================================
-   型
-================================ */
+// JWT デコード
+function decodeJwt(token: string): any {
+  const parts = token.split('.');
+  if (parts.length < 2) throw new Error('invalid jwt');
+  const payload = parts[1];
+  const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+  const decoded = atob(base64);
+  const json = decodeURIComponent(
+    decoded
+      .split('')
+      .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+      .join('')
+  );
+  return JSON.parse(json);
+}
+
+// JSONP（CORS 回避）
+function jsonp<T>(
+  params: Record<string, string | number | boolean | undefined>
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const callbackName = 'jsonp_cb_' + Math.random().toString(36).slice(2);
+    const searchParams = new URLSearchParams();
+
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        searchParams.append(key, String(value));
+      }
+    });
+    searchParams.append('callback', callbackName);
+
+    const script = document.createElement('script');
+
+    (window as any)[callbackName] = (data: T) => {
+      resolve(data);
+      delete (window as any)[callbackName];
+      if (script.parentNode) script.parentNode.removeChild(script);
+    };
+
+    script.src = `${GAS_ENDPOINT}?${searchParams.toString()}`;
+    script.onerror = (err) => {
+      reject(err);
+      delete (window as any)[callbackName];
+      if (script.parentNode) script.parentNode.removeChild(script);
+    };
+    document.body.appendChild(script);
+  });
+}
+
+// 日時表示
+function formatDateTime(iso?: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString('ja-JP');
+}
+
+// 型定義
 type WordItem = {
   id: number;
   book: string;
   deck: string;
-  bookIndex: number;
-  level?: string;
-  subCategory?: string;
+  bookIndex: number | null;
+  level: string | null;
   english: string;
   japanese: string;
-  example_en?: string;
-  example_jp?: string;
-  audio_text?: string;
-  tags?: string[];
+  example_en: string;
+  example_jp: string;
+  audio_text: string;
+  tags: string[];
+  poly?: {
+    group_key: string;
+    sense_index: number;
+  };
 };
 
-type Deck = {
+type DeckData = {
   id: string;
   labelJa: string;
   items: WordItem[];
 };
 
-type Book = {
+type WordsData = {
   bookId: string;
   bookName: string;
-  decks: Record<string, Deck>;
+  decks: Record<string, DeckData>;
 };
 
-type User = {
+type LevelFilter = 'all' | '600' | '730' | '860' | '990';
+
+type Direction = 'en_to_jp' | 'jp_to_en';
+
+type Mode = 'index' | 'level';
+
+type InputMode = 'text' | 'handwriting';
+
+type ViewMode = 'test' | 'flash';
+
+type ShowExamplesMode = 'auto' | 'always' | 'never';
+
+type WrongItemStat = {
+  user_id: string;
+  book_id: string;
+  deck: string;
+  item_id: number;
+  wrong_total: number;
+  correct_total: number;
+  last_wrong_at?: string;
+};
+
+type WrongItemsResponse = {
+  ok: boolean;
+  items?: WrongItemStat[];
+  error?: string;
+};
+
+type RankingEntry = {
   user_id: string;
   display_name: string;
   weekly_correct_total: number;
-  email?: string;
 };
 
-type WrongItem = {
-  user_id: string;
-  item_id: number;
-  book_id: string;
-  deck: string;
-  total_count: number;
-  correct_total: number;
-  wrong_total: number;
-  weekly_correct: number;
-  weekly_wrong: number;
-  last_result: string;
-  last_answered_at: string;
-  last_wrong_at: string;
+type RankingResponse = {
+  ok: boolean;
+  ranking?: RankingEntry[];
+  error?: string;
 };
 
 type UserOverview = {
@@ -76,1967 +148,1364 @@ type UserOverview = {
   weekly_correct_total: number;
   total_correct: number;
   total_wrong: number;
-  last_answered_at: string | null;
+  last_answered_at?: string | null;
 };
 
-type Settings = {
-  pageSize: 1 | 5 | 15 | 30 | 50;
-  randomOrder: boolean;
-  showExamplesMode: "polysemyOnly" | "always" | "never";
-  inputMethod: "keyboard" | "handwrite" | "both";
-  driveDelayMs: number;
-  driveRate: number;
-  driveOrder: Array<"english" | "japanese" | "example_en" | "example_jp">;
+type UserOverviewResponse = {
+  ok: boolean;
+  user?: UserOverview;
+  error?: string;
 };
 
-const DEFAULT_SETTINGS: Settings = {
-  pageSize: 15,
-  randomOrder: true,
-  showExamplesMode: "polysemyOnly",
-  inputMethod: "handwrite",
-  driveDelayMs: 800,
-  driveRate: 1.0,
-  driveOrder: ["english", "japanese", "example_en", "example_jp"],
+type SessionConfig = {
+  deckId: string;
+  mode: Mode;
+  startIndex: number;
+  endIndex: number;
+  level: LevelFilter;
+  direction: Direction;
+  shuffle: boolean;
+  showExamples: ShowExamplesMode;
 };
 
-/* ================================
-   JSONP GET（CORS回避で必須）
-================================ */
-function apiGet<T>(
-  action: string,
-  params: Record<string, any> = {}
-): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const cbName = "__cb_" + Math.random().toString(36).slice(2);
-
-    const url = new URL(API_URL);
-    url.searchParams.set("action", action);
-    url.searchParams.set("callback", cbName);
-    Object.keys(params).forEach((k) =>
-      url.searchParams.set(k, String(params[k]))
-    );
-
-    const script = document.createElement("script");
-    script.src = url.toString();
-    script.async = true;
-
-    window[cbName] = (data: T) => {
-      try {
-        resolve(data);
-      } finally {
-        delete window[cbName];
-        script.remove();
-      }
-    };
-
-    script.onerror = () => {
-      delete window[cbName];
-      script.remove();
-      reject(new Error(`JSONP GET failed: ${action}`));
-    };
-
-    document.body.appendChild(script);
-  });
+function shuffleArray<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 
-/* ================================
-   POST（GAS doPost）
-================================ */
-async function apiPost<T>(
-  action: string,
-  body: Record<string, any>
-): Promise<T> {
-  const res = await fetch(API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify({ action, ...body }),
-  });
-  if (!res.ok) throw new Error(`POST ${action} failed`);
-  return (await res.json()) as T;
-}
-
-/* ================================
-   Fullscreen Hook
-================================ */
-function useSimpleFullscreen<T extends HTMLElement>() {
-  const ref = useRef<T | null>(null);
-  const [isFs, setIsFs] = useState(false);
-  const supportsFs = !!document.documentElement.requestFullscreen;
-
-  const enter = async () => {
-    const el = ref.current;
-    if (!el) return;
-    if (supportsFs) await el.requestFullscreen();
-    setIsFs(true);
-  };
-
-  const exit = async () => {
-    if (supportsFs && document.fullscreenElement) await document.exitFullscreen();
-    setIsFs(false);
-  };
-
-  useEffect(() => {
-    if (!supportsFs) return;
-    const onChange = () => setIsFs(document.fullscreenElement === ref.current);
-    document.addEventListener("fullscreenchange", onChange);
-    return () => document.removeEventListener("fullscreenchange", onChange);
-  }, [supportsFs]);
-
-  return { ref, isFs, enter, exit, supportsFs };
-}
-
-/* ================================
-   JWT デコード
-================================ */
-const decodeJwtPayload = (jwt: string) => {
-  const base64Url = jwt.split(".")[1];
-  const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
-  const json = decodeURIComponent(
-    atob(base64)
-      .split("")
-      .map((c) => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2))
-      .join("")
-  );
-  return JSON.parse(json);
-};
-
-/* ================================
-   メイン App
-================================ */
 export default function App() {
-  /* ------------------------------
-     端末向き/背景
-  ------------------------------ */
-  const [isPortrait, setIsPortrait] = useState(
-    window.innerHeight >= window.innerWidth
-  );
-  useEffect(() => {
-    const onResize = () =>
-      setIsPortrait(window.innerHeight >= window.innerWidth);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
+  // ---- auth ----
+  const [authReady, setAuthReady] = useState(false);
+  const [isPostLoginLoading, setIsPostLoginLoading] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [displayName, setDisplayName] = useState<string | null>(null);
 
-  const shellStyle: CSSProperties = {
-    minHeight: "100vh",
-    width: "100vw",
-    boxSizing: "border-box",
-    padding: isPortrait ? "10px" : "16px",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "flex-start",
-    background:
-      "linear-gradient(135deg, #0ea5e9 0%, #6366f1 50%, #a855f7 100%)",
-    fontFamily:
-      '"Noto Sans JP", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-    color: "#111827",
-  };
+  // ---- data ----
+  const [wordsData, setWordsData] = useState<WordsData | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
 
-  const containerStyle: CSSProperties = {
-    width: "100%",
-    maxWidth: isPortrait ? 720 : 1100,
-  };
-
-  /* ------------------------------
-     単語データ読み込み
-  ------------------------------ */
-  const [books, setBooks] = useState<Book[]>([]);
-  const [loadingWords, setLoadingWords] = useState(false);
-  const [wordsError, setWordsError] = useState<string | null>(null);
-
-  useEffect(() => {
-    (async () => {
-      setLoadingWords(true);
-      setWordsError(null);
-      try {
-        const base = (import.meta as any).env?.BASE_URL || "/";
-        const url = base.endsWith("/")
-          ? base + "words_gold.json"
-          : base + "/words_gold.json";
-
-        const res = await fetch(url, { cache: "no-store" });
-        if (!res.ok)
-          throw new Error(`words_gold.json fetch failed: ${res.status}`);
-
-        const json = await res.json();
-
-        let loaded: Book[] = [];
-        if (Array.isArray(json.books)) {
-          loaded = json.books;
-        } else if (json.bookId && json.decks) {
-          loaded = [json as Book];
-        } else {
-          throw new Error("words_gold.json format mismatch");
-        }
-
-        loaded.forEach((b) => {
-          Object.values(b.decks).forEach((d) => {
-            d.items = d.items.map((it: any) => {
-              const sc =
-                it.subCategory ??
-                it.sub_category ??
-                it.subcategory ??
-                (() => {
-                  const tag = (it.tags || []).find((t: string) =>
-                    t.startsWith("sub:")
-                  );
-                  return tag ? tag.replace("sub:", "") : undefined;
-                })();
-              return { ...it, subCategory: sc } as WordItem;
-            });
-          });
-        });
-
-        setBooks(loaded);
-      } catch (e: any) {
-        console.error("load words json error", e);
-        setWordsError(String(e?.message || e));
-        setBooks([]);
-      } finally {
-        setLoadingWords(false);
-      }
-    })();
-  }, []);
-
-  /* ------------------------------
-     Book/Set選択（ログインより先に宣言）
-  ------------------------------ */
-  const [selectedBookId, setSelectedBookId] = useState<string>("");
-  const [selectedSetId, setSelectedSetId] = useState<string>("core");
-
-  // 最新値をGoogleログインcallbackで使うためrefに同期
-  const selectedBookIdRef = useRef<string>("");
-  const selectedSetIdRef = useRef<string>("core");
-  useEffect(() => {
-    selectedBookIdRef.current = selectedBookId;
-  }, [selectedBookId]);
-  useEffect(() => {
-    selectedSetIdRef.current = selectedSetId;
-  }, [selectedSetId]);
-
-  useEffect(() => {
-    if (books.length && !selectedBookId) {
-      setSelectedBookId(books[0].bookId);
-      const firstDeck = Object.keys(books[0].decks)[0] || "core";
-      setSelectedSetId(firstDeck);
-    }
-  }, [books, selectedBookId]);
-
-  const selectedBook = useMemo(
-    () => books.find((b) => b.bookId === selectedBookId),
-    [books, selectedBookId]
-  );
-  const selectedDeck = useMemo(
-    () => selectedBook?.decks[selectedSetId],
-    [selectedBook, selectedSetId]
-  );
-  const allItems = selectedDeck?.items ?? [];
-
-  /* ------------------------------
-     ログイン / ブート
-  ------------------------------ */
-  const [user, setUser] = useState<User | null>(null);
-  const [loginReady, setLoginReady] = useState(false);
-  const googleBtnRef = useRef<HTMLDivElement | null>(null);
-  const [booting, setBooting] = useState(false);
-
-  useEffect(() => {
-    const id = "google-gsi";
-    if (document.getElementById(id)) {
-      setLoginReady(true);
-      return;
-    }
-    const script = document.createElement("script");
-    script.id = id;
-    script.src = "https://accounts.google.com/gsi/client";
-    script.async = true;
-    script.defer = true;
-    script.onload = () => setLoginReady(true);
-    document.body.appendChild(script);
-  }, []);
-
-  /* ------------------------------
-     設定（ローカル保存）
-  ------------------------------ */
-  const [settings, setSettings] = useState<Settings>(() => {
-    const s = localStorage.getItem("settings_json");
-    return s ? (JSON.parse(s) as Settings) : DEFAULT_SETTINGS;
+  // ---- session config ----
+  const [sessionConfig, setSessionConfig] = useState<SessionConfig>({
+    deckId: 'core',
+    mode: 'index',
+    startIndex: 1,
+    endIndex: 1000,
+    level: 'all',
+    direction: 'en_to_jp',
+    shuffle: true,
+    showExamples: 'auto',
   });
 
+  const [inputMode, setInputMode] = useState<InputMode>('text');
+  const [viewMode, setViewMode] = useState<ViewMode>('test');
+  const [showConfigPanel, setShowConfigPanel] = useState(true);
+
+  // ---- session state ----
+  const [sessionBookId, setSessionBookId] = useState<string | null>(null);
+  const [sessionDeckId, setSessionDeckId] = useState<string | null>(null);
+  const [sessionItems, setSessionItems] = useState<WordItem[]>([]);
+  const [currentPage, setCurrentPage] = useState<number>(0);
+  const [pageSize, setPageSize] = useState<number>(15);
+
+  // test answers
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [marks, setMarks] = useState<Record<number, 'correct' | 'wrong'>>({});
+  const [showAnswers, setShowAnswers] = useState<boolean>(false);
+  const [isSavingPage, setIsSavingPage] = useState<boolean>(false);
+
+  // flash cards
+  const [cardIndex, setCardIndex] = useState<number>(0);
+  const [showCardAnswer, setShowCardAnswer] = useState<boolean>(false);
+
+  // ranking / mypage
+  const [ranking, setRanking] = useState<RankingEntry[] | null>(null);
+  const [isLoadingRanking, setIsLoadingRanking] = useState<boolean>(false);
+  const [userOverview, setUserOverview] = useState<UserOverview | null>(null);
+  const [isLoadingOverview, setIsLoadingOverview] = useState<boolean>(false);
+  const [myPageWrongItems, setMyPageWrongItems] = useState<WrongItemStat[] | null>(null);
+  const [isLoadingMyPageWrong, setIsLoadingMyPageWrong] = useState<boolean>(false);
+  const [displayNameEdit, setDisplayNameEdit] = useState<string>('');
+
+  // speech
+  const [englishVoice, setEnglishVoice] = useState<SpeechSynthesisVoice | null>(null);
+
+  // google button
+  const googleBtnRef = useRef<HTMLDivElement | null>(null);
+
+  // prefetch guard
+  const didPrefetchRef = useRef(false);
+
+  // -------------------------
+  // Restore auth from localStorage (avoid iPhone re-login / flicker)
+  // -------------------------
   useEffect(() => {
-    localStorage.setItem("settings_json", JSON.stringify(settings));
-  }, [settings]);
-
-  /* ------------------------------
-     MyPageデータ
-  ------------------------------ */
-  const [wrongItems, setWrongItems] = useState<WrongItem[]>([]);
-  const [overview, setOverview] = useState<UserOverview | null>(null);
-
-  const prefetchUserData = async (u: User, bookId: string, deckId: string) => {
-    const [o, w] = await Promise.all([
-      apiGet<{ ok: boolean; user: UserOverview }>("getUserOverview", {
-        userId: u.user_id,
-      }),
-      apiGet<{ ok: boolean; items: WrongItem[] }>("getWrongItems", {
-        userId: u.user_id,
-        bookId,
-        deck: deckId,
-      }),
-    ]);
-    if (o.ok) setOverview(o.user);
-    if (w.ok) setWrongItems(w.items);
-  };
-
-  const loadSettingsFromServer = async (userId: string) => {
     try {
-      const r = await apiGet<{ ok: boolean; settings: any }>(
-        "getUserSettings",
-        { userId }
-      );
-      if (r.ok && r.settings) {
-        const merged = { ...DEFAULT_SETTINGS, ...r.settings };
-        setSettings(merged);
-        localStorage.setItem("settings_json", JSON.stringify(merged));
+      const saved = localStorage.getItem('auth');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed?.userId) setUserId(parsed.userId);
+        if (parsed?.displayName) setDisplayName(parsed.displayName);
       }
-    } catch (e) {
-      console.warn("getUserSettings failed", e);
-    }
-  };
+    } catch {}
+    setAuthReady(true);
+  }, []);
 
-  // ★ここを修正：
-  // 依存にselectedBookId/selectedSetIdを入れず、refから最新値を読む
+  // -------------------------
+  // Load word json (BASE_URL)
+  // -------------------------
   useEffect(() => {
-    if (!loginReady || user) return;
-    if (!window.google?.accounts?.id || !googleBtnRef.current) return;
+    const load = async () => {
+      try {
+        const url = `${import.meta.env.BASE_URL}words_gold.json`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+        const data: WordsData = await res.json();
+        setWordsData(data);
 
-    window.google.accounts.id.initialize({
-      client_id: CLIENT_ID,
-      callback: async (res: any) => {
-        setBooting(true);
-        try {
-          const payload = decodeJwtPayload(res.credential);
-          const userId = payload.sub;
-          const email = payload.email || "";
-          const displayName =
-            payload.name || payload.given_name || "user";
-
-          const out = await apiPost<{ ok: boolean }>("upsertUser", {
-            userId,
-            googleSub: payload.sub,
-            email,
-            displayName,
-          });
-          if (!out.ok) throw new Error("upsertUser failed");
-
-          const newUser: User = {
-            user_id: userId,
-            display_name: displayName,
-            weekly_correct_total: 0,
-            email,
-          };
-          setUser(newUser);
-
-          // ①設定復元
-          await loadSettingsFromServer(userId);
-
-          // ②最新の選択をrefから取得
-          const bid = selectedBookIdRef.current || "";
-          const sid = selectedSetIdRef.current || "core";
-          await prefetchUserData(newUser, bid, sid);
-        } catch (e) {
-          console.error("google login failed", e);
-          setUser(null);
-        } finally {
-          setBooting(false);
+        // deckId が存在しない場合は先頭に合わせる
+        const deckKeys = Object.keys(data.decks);
+        if (deckKeys.length && !data.decks[sessionConfig.deckId]) {
+          setSessionConfig((prev) => ({ ...prev, deckId: deckKeys[0] }));
         }
-      },
-    });
-
-    window.google.accounts.id.renderButton(googleBtnRef.current, {
-      theme: "outline",
-      size: "large",
-      type: "standard",
-      text: "signin_with",
-      shape: "pill",
-    });
-  }, [loginReady, user]);
-
-  /* ------------------------------
-     deckが変わったら苦手単語も更新
-  ------------------------------ */
-  useEffect(() => {
-    if (!user || !selectedBookId || !selectedSetId) return;
-    apiGet<{ ok: boolean; items: WrongItem[] }>("getWrongItems", {
-      userId: user.user_id,
-      bookId: selectedBookId,
-      deck: selectedSetId,
-    })
-      .then((w) => {
-        if (w.ok) setWrongItems(w.items);
-      })
-      .catch(() => {});
-  }, [user, selectedBookId, selectedSetId]);
-
-  const polysemyCount = useMemo(() => {
-    const m = new Map<string, number>();
-    allItems.forEach((it) =>
-      m.set(it.english, (m.get(it.english) || 0) + 1)
-    );
-    return m;
-  }, [allItems]);
-
-  const subCategoryList = useMemo(() => {
-    const s = new Set<string>();
-    allItems.forEach((it) => {
-      if (it.subCategory) s.add(it.subCategory);
-    });
-    return ["all", ...Array.from(s)];
-  }, [allItems]);
-
-  const weakItemIds = useMemo(
-    () => new Set(wrongItems.map((w) => w.item_id)),
-    [wrongItems]
-  );
-
-  /* ------------------------------
-     音声（iOS対策）
-  ------------------------------ */
-  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const primedRef = useRef(false);
-
-  useEffect(() => {
-    const load = () => {
-      const v = window.speechSynthesis.getVoices();
-      if (v && v.length) setVoices(v);
+      } catch (e) {
+        console.error(e);
+        setMessage('単語データの読み込みに失敗しました');
+      }
     };
     load();
-    window.speechSynthesis.onvoiceschanged = load;
-    return () => {
-      window.speechSynthesis.onvoiceschanged = null;
-    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const primeSpeech = () => {
-    if (primedRef.current) return;
-    primedRef.current = true;
-    window.speechSynthesis.getVoices();
+  // -------------------------
+  // Pick English voice (best-effort for iOS too)
+  // -------------------------
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    const synth = window.speechSynthesis;
+
+    const pickVoice = () => {
+      const voices = synth.getVoices();
+      if (!voices || voices.length === 0) return;
+      const en = voices.filter((v) => (v.lang || '').toLowerCase().startsWith('en'));
+      const preferredNames = ['Samantha', 'Karen', 'Daniel', 'Alex', 'Fred'];
+      let chosen: SpeechSynthesisVoice | null = null;
+      for (const name of preferredNames) {
+        const found = en.find((v) => v.name.includes(name));
+        if (found) { chosen = found; break; }
+      }
+      if (!chosen) chosen = en[0] || voices[0];
+      setEnglishVoice(chosen);
+    };
+
+    pickVoice();
+    synth.addEventListener('voiceschanged', pickVoice);
+    return () => synth.removeEventListener('voiceschanged', pickVoice);
+  }, []);
+
+  const speakEnglish = (text: string) => {
+    if (!text) return;
+    const synth = window.speechSynthesis;
+    if (!synth) {
+      alert('このブラウザは音声読み上げに対応していません');
+      return;
+    }
+
+    // iOS対策：resume してから speak
+    try { synth.cancel(); } catch {}
+    try { synth.resume(); } catch {}
+
+    const utter = new SpeechSynthesisUtterance(text);
+    if (englishVoice) {
+      utter.voice = englishVoice;
+      utter.lang = englishVoice.lang;
+    } else {
+      utter.lang = 'en-US';
+    }
+    utter.rate = 0.9;
+    utter.pitch = 1.0;
+    synth.speak(utter);
   };
 
-  const speak = (
-    text: string,
-    lang: "en-US" | "ja-JP" = "en-US",
-    rate?: number
-  ) => {
-    if (!text) return;
-    primeSpeech();
+  // -------------------------
+  // Google login handler
+  // -------------------------
+  async function handleGoogleCredentialResponse(response: any) {
+    setIsPostLoginLoading(true);
+    setMessage(null);
     try {
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = lang;
-      u.rate = rate ?? settings.driveRate;
+      const idToken = response.credential as string | undefined;
+      if (!idToken) throw new Error('no id token');
 
-      const candidates = voices.filter((v) =>
-        v.lang.startsWith(lang.split("-")[0])
-      );
-      if (candidates.length) u.voice = candidates[0];
+      const payload = decodeJwt(idToken);
+      const sub = String(payload.sub);
+      const email = (payload.email as string) || '';
+      const name = (payload.name as string) || '';
 
-      window.speechSynthesis.speak(u);
+      const localUserId = 'g_' + sub;
+      const localDisplay = name || email || localUserId;
 
-      if (!voices.length) {
-        setTimeout(() => {
-          if (!window.speechSynthesis.speaking) {
-            window.speechSynthesis.cancel();
-            window.speechSynthesis.speak(u);
-          }
-        }, 120);
+      setUserId(localUserId);
+      setDisplayName(localDisplay);
+      localStorage.setItem('auth', JSON.stringify({ userId: localUserId, displayName: localDisplay }));
+
+      const body = {
+        action: 'upsertUser',
+        userId: localUserId,
+        googleSub: sub,
+        email,
+        displayName: localDisplay,
+      };
+
+      // upsert は no-cors で fire-and-forget
+      fetch(GAS_ENDPOINT, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(body),
+      }).catch((e) => console.error(e));
+
+      // すぐにスプレッドシート情報も取りに行く（ぐるぐる中）
+      if (wordsData && !didPrefetchRef.current) {
+        await prefetchUserData(localUserId, wordsData.bookId, sessionConfig.deckId);
+        didPrefetchRef.current = true;
       }
     } catch (e) {
-      console.error("speech", e);
+      console.error(e);
+      setMessage('Google ログインに失敗しました');
+      setUserId(null);
+      setDisplayName(null);
+      localStorage.removeItem('auth');
+    } finally {
+      setIsPostLoginLoading(false);
     }
-  };
-
-  /* ------------------------------
-     画面状態
-  ------------------------------ */
-  const [activeTab, setActiveTab] = useState<"test" | "cards">("test");
-  const [showSettings, setShowSettings] = useState(false);
-  const [showMyPage, setShowMyPage] = useState(false);
-
-  /* ------------------------------
-     設定モーダル（保存ボタン方式）
-  ------------------------------ */
-  const [draftSettings, setDraftSettings] = useState<Settings>(settings);
-  useEffect(() => {
-    if (showSettings) setDraftSettings(settings);
-  }, [showSettings, settings]);
-
-  const saveSettings = async () => {
-    setSettings(draftSettings);
-    localStorage.setItem("settings_json", JSON.stringify(draftSettings));
-    if (user) {
-      await apiPost("saveUserSettings", {
-        userId: user.user_id,
-        settings: draftSettings,
-      }).catch(() => {});
-    }
-    alert("設定を保存しました！");
-    setShowSettings(false);
-  };
-
-  /* ------------------------------
-     MyPage開閉 + 表示名変更
-  ------------------------------ */
-  const openMyPage = async () => {
-    if (!user) return;
-    setShowMyPage(true);
-    try {
-      const o = await apiGet<{ ok: boolean; user: UserOverview }>(
-        "getUserOverview",
-        { userId: user.user_id }
-      );
-      if (o.ok) setOverview(o.user);
-    } catch {}
-  };
-
-  const updateDisplayName = async (name: string) => {
-    if (!user) return false;
-    try {
-      const out = await apiPost<{ ok: boolean }>("updateDisplayName", {
-        userId: user.user_id,
-        displayName: name,
-      });
-      if (out.ok) {
-        setUser({ ...user, display_name: name });
-        setOverview((p) => (p ? { ...p, display_name: name } : p));
-        alert("表示名を保存しました！");
-        setShowMyPage(false);
-        return true;
-      }
-    } catch {}
-    return false;
-  };
-
-  /* ------------------------------
-     テスト設定
-  ------------------------------ */
-  const [testMode, setTestMode] = useState<"level" | "number">("level");
-  const [level, setLevel] = useState<string>("600");
-  const [rangeStart, setRangeStart] = useState(1);
-  const [rangeEnd, setRangeEnd] = useState(1000);
-  const [subCat, setSubCat] = useState<string>("all");
-  const [mistakeOnly, setMistakeOnly] = useState(false);
-
-  const isCoreSelected = selectedSetId === "core";
-  useEffect(() => {
-    if (!isCoreSelected && testMode === "number") {
-      setTestMode("level");
-    }
-  }, [isCoreSelected, testMode]);
-
-  /* ------------------------------
-     テスト進行
-  ------------------------------ */
-  const [testStarted, setTestStarted] = useState(false);
-  const [grading, setGrading] = useState(false);
-  const [pageIndex, setPageIndex] = useState(0);
-
-  const [questions, setQuestions] = useState<WordItem[]>([]);
-  const [answersText, setAnswersText] = useState<Record<number, string>>({});
-  const [results, setResults] = useState<Record<number, boolean>>({});
-
-  const testTopRef = useRef<HTMLDivElement | null>(null);
-
-  const buildTestList = () => {
-    let list = [...allItems];
-    if (mistakeOnly) list = list.filter((it) => weakItemIds.has(it.id));
-
-    if (isCoreSelected) {
-      if (testMode === "level") {
-        list = list.filter((it) => it.level === level);
-      } else {
-        list = list.filter(
-          (it) => it.bookIndex >= rangeStart && it.bookIndex <= rangeEnd
-        );
-      }
-    } else {
-      if (subCat !== "all") {
-        list = list.filter((it) => it.subCategory === subCat);
-      }
-    }
-
-    if (settings.randomOrder) {
-      for (let i = list.length - 1; i > 0; i--) {
-        const j = (Math.random() * (i + 1)) | 0;
-        [list[i], list[j]] = [list[j], list[i]];
-      }
-    } else {
-      list.sort((a, b) => a.bookIndex - b.bookIndex);
-    }
-
-    return list;
-  };
-
-  const startTest = () => {
-    setQuestions(buildTestList());
-    setAnswersText({});
-    setResults({});
-    setPageIndex(0);
-    setGrading(false);
-    setTestStarted(true);
-  };
-
-  const pageSize = settings.pageSize;
-  const pages = Math.ceil(questions.length / pageSize);
-  const pageQuestions = questions.slice(
-    pageIndex * pageSize,
-    (pageIndex + 1) * pageSize
-  );
-
-  const showExampleForItem = (it: WordItem) => {
-    const isPoly = (polysemyCount.get(it.english) || 1) > 1;
-    if (settings.showExamplesMode === "always") return true;
-    if (settings.showExamplesMode === "never") return false;
-    return isPoly;
-  };
-
-  const beginGrading = () => {
-    setGrading(true);
-    testTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    const newRes: Record<number, boolean> = { ...results };
-    pageQuestions.forEach((q) => {
-      if (newRes[q.id] == null) newRes[q.id] = true;
-    });
-    setResults(newRes);
-  };
-
-  const submitPageAndNext = async () => {
-    if (user) {
-      try {
-        const payload = pageQuestions.map((q) => ({
-          itemId: q.id,
-          isCorrect: results[q.id] ?? true,
-        }));
-        await apiPost("saveResults", {
-          userId: user.user_id,
-          bookId: selectedBookId,
-          deck: selectedSetId,
-          results: payload,
-        });
-      } catch (e) {
-        console.error("saveResults error", e);
-      }
-    }
-
-    if (pageIndex < pages - 1) {
-      setPageIndex(pageIndex + 1);
-      setGrading(false);
-    } else {
-      setTestStarted(false);
-      setGrading(false);
-    }
-  };
-
-  const prevPage = () => {
-    if (pageIndex === 0) return;
-    setPageIndex(pageIndex - 1);
-    setGrading(false);
-  };
-
-  /* ------------------------------
-     単語カード設定
-  ------------------------------ */
-  const [cardsStarted, setCardsStarted] = useState(false);
-  const [cardMode, setCardMode] = useState<"level" | "number">("level");
-  const [cardLevel, setCardLevel] = useState("600");
-  const [cardRangeStart, setCardRangeStart] = useState(1);
-  const [cardRangeEnd, setCardRangeEnd] = useState(1000);
-  const [cardSubCat, setCardSubCat] = useState("all");
-  const [cardMistakeOnly, setCardMistakeOnly] = useState(false);
-
-  useEffect(() => {
-    if (!isCoreSelected && cardMode === "number") setCardMode("level");
-  }, [isCoreSelected, cardMode]);
-
-  const [cardsList, setCardsList] = useState<WordItem[]>([]);
-  const [cardIndex, setCardIndex] = useState(0);
-  const [cardSide, setCardSide] = useState<"front" | "back">("front");
-  const cardFs = useSimpleFullscreen<HTMLDivElement>();
-  const [cardPseudoFs, setCardPseudoFs] = useState(false);
-
-  const buildCardsList = () => {
-    let list = [...allItems];
-    if (cardMistakeOnly) list = list.filter((it) => weakItemIds.has(it.id));
-
-    if (isCoreSelected) {
-      if (cardMode === "level") {
-        list = list.filter((it) => it.level === cardLevel);
-      } else {
-        list = list.filter(
-          (it) =>
-            it.bookIndex >= cardRangeStart && it.bookIndex <= cardRangeEnd
-        );
-      }
-    } else {
-      if (cardSubCat !== "all") {
-        list = list.filter((it) => it.subCategory === cardSubCat);
-      }
-    }
-
-    if (settings.randomOrder) {
-      for (let i = list.length - 1; i > 0; i--) {
-        const j = (Math.random() * (i + 1)) | 0;
-        [list[i], list[j]] = [list[j], list[i]];
-      }
-    } else {
-      list.sort((a, b) => a.bookIndex - b.bookIndex);
-    }
-    return list;
-  };
-
-  const startCards = () => {
-    const list = buildCardsList();
-    setCardsList(list);
-    setCardIndex(0);
-    setCardSide("front");
-    setCardsStarted(true);
-  };
-
-  const currentCard = cardsList[cardIndex];
-
-  /* ------------------------------
-     ドライブモード
-  ------------------------------ */
-  const driveFs = useSimpleFullscreen<HTMLDivElement>();
-  const [driveOpen, setDriveOpen] = useState(false);
-  const [drivePlaying, setDrivePlaying] = useState(false);
-  const [driveFieldIndex, setDriveFieldIndex] = useState(0);
-
-  const [driveRateLocal, setDriveRateLocal] = useState(settings.driveRate);
-
-  const driveFields = settings.driveOrder;
-
-  const getFieldText = (it: WordItem, field: Settings["driveOrder"][0]) => {
-    if (!it) return "";
-    if (field === "english") return it.english;
-    if (field === "japanese") return it.japanese;
-    if (field === "example_en") return it.example_en || "";
-    if (field === "example_jp") return it.example_jp || "";
-    return "";
-  };
-
-  useEffect(() => {
-    if (!driveOpen || !drivePlaying || !currentCard) return;
-    let cancelled = false;
-
-    const playLoop = async () => {
-      const field = driveFields[driveFieldIndex];
-      const txt = getFieldText(currentCard, field);
-      if (txt) {
-        speak(
-          txt,
-          field === "english" || field === "example_en" ? "en-US" : "ja-JP",
-          driveRateLocal
-        );
-      }
-
-      const waitSpeechEnd = () =>
-        new Promise<void>((resolve) => {
-          const check = () => {
-            if (cancelled) return resolve();
-            if (!window.speechSynthesis.speaking) return resolve();
-            requestAnimationFrame(check);
-          };
-          check();
-        });
-
-      await waitSpeechEnd();
-      await new Promise((r) => setTimeout(r, settings.driveDelayMs));
-      if (cancelled) return;
-
-      if (driveFieldIndex < driveFields.length - 1) {
-        setDriveFieldIndex((i) => i + 1);
-      } else {
-        setDriveFieldIndex(0);
-        setCardIndex((i) => (i < cardsList.length - 1 ? i + 1 : 0));
-      }
-    };
-
-    playLoop();
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    driveOpen,
-    drivePlaying,
-    driveFieldIndex,
-    currentCard,
-    cardsList.length,
-    driveFields,
-    settings.driveDelayMs,
-    driveRateLocal,
-  ]);
-
-  const openDrive = () => {
-    setDriveOpen(true);
-    setDriveFieldIndex(0);
-    setDrivePlaying(false);
-    setDriveRateLocal(settings.driveRate);
-  };
-
-  /* ------------------------------
-     ログイン前UI
-  ------------------------------ */
-  if (!user) {
-    return (
-      <div style={shellStyle}>
-        <div style={containerStyle}>
-          <div
-            style={{
-              background: "#fff",
-              borderRadius: 14,
-              padding: "24px 18px",
-              boxShadow: "0 6px 18px rgba(0,0,0,0.15)",
-            }}
-          >
-            <h1 style={{ fontSize: 28, marginBottom: 8 }}>📚 Vocab Sprint</h1>
-            <p style={{ marginBottom: 20 }}>
-              単語テストと単語カードでサクサク復習しよう
-            </p>
-            <div ref={googleBtnRef} />
-          </div>
-        </div>
-      </div>
-    );
   }
 
-  /* ------------------------------
-     ログイン後UI
-  ------------------------------ */
+  // -------------------------
+  // Init Google button (render once)
+  // -------------------------
+  useEffect(() => {
+    if (!authReady || userId) return;
+    if (!GOOGLE_CLIENT_ID) return;
+
+    const tryInit = () => {
+      if (!window.google || !window.google.accounts?.id) {
+        setTimeout(tryInit, 400);
+        return;
+      }
+
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleGoogleCredentialResponse,
+      });
+
+      if (googleBtnRef.current) {
+        window.google.accounts.id.renderButton(googleBtnRef.current, {
+          theme: 'outline',
+          size: 'large',
+          type: 'standard',
+          text: 'signin_with',
+          shape: 'pill',
+        });
+      }
+
+      // iOSでOne Tapが出ない時の保険
+      try { window.google.accounts.id.prompt(); } catch {}
+    };
+
+    tryInit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady, userId]);
+
+  // -------------------------
+  // Debug login
+  // -------------------------
+  const handleDebugLogin = async () => {
+    const id = 'debug_user';
+    setIsPostLoginLoading(true);
+    setUserId(id);
+    setDisplayName(id);
+    localStorage.setItem('auth', JSON.stringify({ userId: id, displayName: id }));
+
+    const body = {
+      action: 'upsertUser',
+      userId: id,
+      googleSub: '',
+      email: '',
+      displayName: id,
+    };
+    fetch(GAS_ENDPOINT, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(body),
+    }).catch((e) => console.error(e));
+
+    if (wordsData && !didPrefetchRef.current) {
+      await prefetchUserData(id, wordsData.bookId, sessionConfig.deckId);
+      didPrefetchRef.current = true;
+    }
+    setIsPostLoginLoading(false);
+  };
+
+  // -------------------------
+  // Prefetch mypage info on (userId + words) ready
+  // -------------------------
+  const prefetchUserData = async (uid: string, bookId: string, deckId: string) => {
+    setIsLoadingOverview(true);
+    setIsLoadingMyPageWrong(true);
+    try {
+      const [overviewRes, wrongRes] = await Promise.all([
+        jsonp<UserOverviewResponse>({ action: 'getUserOverview', userId: uid }),
+        jsonp<WrongItemsResponse>({ action: 'getWrongItems', userId: uid, bookId, deck: deckId }),
+      ]);
+
+      if (overviewRes.ok && overviewRes.user) {
+        setUserOverview(overviewRes.user);
+        setDisplayNameEdit(overviewRes.user.display_name);
+      } else {
+        setUserOverview(null);
+      }
+
+      if (wrongRes.ok && wrongRes.items) {
+        const items = [...wrongRes.items].filter((i) => i.wrong_total > 0);
+        items.sort((a, b) => {
+          if (b.wrong_total !== a.wrong_total) return b.wrong_total - a.wrong_total;
+          const ad = a.last_wrong_at ? Date.parse(a.last_wrong_at) : 0;
+          const bd = b.last_wrong_at ? Date.parse(b.last_wrong_at) : 0;
+          return bd - ad;
+        });
+        setMyPageWrongItems(items.slice(0, 10));
+      } else {
+        setMyPageWrongItems(null);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLoadingOverview(false);
+      setIsLoadingMyPageWrong(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!userId || !wordsData || didPrefetchRef.current) return;
+    prefetchUserData(userId, wordsData.bookId, sessionConfig.deckId).then(() => {
+      didPrefetchRef.current = true;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, wordsData]);
+
+  // -------------------------
+  // Start normal session
+  // -------------------------
+  const handleStartSession = () => {
+    if (!wordsData) {
+      setMessage('単語データがまだ読み込まれていません');
+      return;
+    }
+
+    const deck = wordsData.decks[sessionConfig.deckId];
+    if (!deck) {
+      setMessage('選択されたセットが見つかりません: ' + sessionConfig.deckId);
+      return;
+    }
+
+    let filtered: WordItem[] = [];
+
+    if (sessionConfig.mode === 'index') {
+      const start = Math.max(1, sessionConfig.startIndex);
+      const end = Math.max(start, sessionConfig.endIndex);
+
+      filtered = deck.items.filter((item) => {
+        const idx = item.bookIndex ?? 0;
+        return idx >= start && idx <= end;
+      });
+    } else {
+      filtered = deck.items.filter((item) => {
+        if (sessionConfig.level === 'all') return true;
+        return item.level === sessionConfig.level;
+      });
+    }
+
+    if (sessionConfig.shuffle) {
+      filtered = shuffleArray(filtered);
+    }
+
+    setSessionItems(filtered);
+    setSessionBookId(wordsData.bookId);
+    setSessionDeckId(sessionConfig.deckId);
+    setCurrentPage(0);
+    setAnswers({});
+    setMarks({});
+    setShowAnswers(false);
+    setCardIndex(0);
+    setShowCardAnswer(false);
+    setShowConfigPanel(false);
+  };
+
+  // -------------------------
+  // Start wrong session
+  // -------------------------
+  const handleStartWrongSession = async () => {
+    if (!userId) {
+      alert('苦手単語モードにはログインが必要です');
+      return;
+    }
+    if (!wordsData) {
+      alert('単語データがまだ読み込まれていません');
+      return;
+    }
+
+    const bookId = wordsData.bookId;
+    const deckId = sessionConfig.deckId;
+
+    try {
+      const res = await jsonp<WrongItemsResponse>({
+        action: 'getWrongItems',
+        userId,
+        bookId,
+        deck: deckId,
+      });
+
+      if (!res.ok || !res.items) {
+        alert('苦手単語リストの取得に失敗しました');
+        return;
+      }
+
+      const deck = wordsData.decks[deckId];
+      if (!deck) {
+        alert('セットが見つかりません: ' + deckId);
+        return;
+      }
+
+      const mapById = new Map<number, WordItem>();
+      deck.items.forEach((w) => mapById.set(w.id, w));
+
+      let wordList: WordItem[] = [];
+      res.items.forEach((stat) => {
+        const item = mapById.get(stat.item_id);
+        if (item) wordList.push(item);
+      });
+
+      if (wordList.length === 0) {
+        alert('不正解がある単語がまだありません');
+        setSessionItems([]);
+        return;
+      }
+
+      if (sessionConfig.shuffle) {
+        wordList = shuffleArray(wordList);
+      }
+
+      setSessionItems(wordList);
+      setSessionBookId(bookId);
+      setSessionDeckId(deckId);
+      setCurrentPage(0);
+      setAnswers({});
+      setMarks({});
+      setShowAnswers(false);
+      setCardIndex(0);
+      setShowCardAnswer(false);
+      setShowConfigPanel(false);
+    } catch (e) {
+      console.error(e);
+      alert('苦手単語モード取得時にエラーが発生しました');
+    }
+  };
+
+  // -------------------------
+  // Paging
+  // -------------------------
+  const totalPages = sessionItems.length > 0 ? Math.ceil(sessionItems.length / pageSize) : 0;
+  const startIndex = currentPage * pageSize;
+  const endIndex = Math.min(startIndex + pageSize, sessionItems.length);
+  const pageItems = sessionItems.slice(startIndex, endIndex);
+  const isEnToJp = sessionConfig.direction === 'en_to_jp';
+
+  const shouldShowExampleInQuestion = (word: WordItem): boolean => {
+    if (sessionConfig.showExamples === 'never') return false;
+    if (sessionConfig.showExamples === 'always') return true;
+    return !!word.poly; // auto: 多義語のみ
+  };
+
+  // -------------------------
+  // Show answers for current page
+  // -------------------------
+  const handleShowAnswersForPage = () => {
+    setShowAnswers(true);
+    setMarks((prev) => {
+      const updated: Record<number, 'correct' | 'wrong'> = { ...prev };
+      pageItems.forEach((_, idx) => {
+        const absIndex = startIndex + idx;
+        if (updated[absIndex] === undefined) updated[absIndex] = 'correct';
+      });
+      return updated;
+    });
+    // 採点開始したら自動でトップへ戻る
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // -------------------------
+  // Save current page results
+  // -------------------------
+  const handleSaveCurrentPage = async () => {
+    if (!sessionBookId || !sessionDeckId) {
+      alert('セッションが開始されていません');
+      return;
+    }
+    if (!userId) {
+      alert('先にログインしてください');
+      return;
+    }
+    if (pageItems.length === 0) {
+      alert('このページには問題がありません');
+      return;
+    }
+
+    const missing = pageItems.filter((_, idx) => {
+      const absIndex = startIndex + idx;
+      return marks[absIndex] === undefined;
+    });
+
+    if (missing.length > 0) {
+      const ok = window.confirm(
+        '自己採点していない問題があります。このまま未採点問題をすべて「×」として記録しますか？'
+      );
+      if (!ok) return;
+    }
+
+    const results = pageItems.map((item, idx) => {
+      const absIndex = startIndex + idx;
+      const mark = marks[absIndex];
+      const isCorrect = mark === 'correct';
+      return { itemId: item.id, isCorrect };
+    });
+
+    setIsSavingPage(true);
+    try {
+      const payload = {
+        action: 'saveResults',
+        userId,
+        bookId: sessionBookId,
+        deck: sessionDeckId,
+        results,
+      };
+
+      await fetch(GAS_ENDPOINT, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload),
+      });
+
+      alert('このページの成績を保存しました');
+
+      if (currentPage + 1 < totalPages) {
+        setCurrentPage((prev) => prev + 1);
+        setShowAnswers(false);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else {
+        alert('セッションが終了しました');
+      }
+
+      // 週次正解数などが増えるので、マイページも更新しておく
+      if (wordsData) {
+        didPrefetchRef.current = false;
+        prefetchUserData(userId, wordsData.bookId, sessionDeckId);
+      }
+    } catch (e) {
+      console.error(e);
+      alert('成績保存リクエストの送信に失敗しました');
+    } finally {
+      setIsSavingPage(false);
+    }
+  };
+
+  // -------------------------
+  // Ranking
+  // -------------------------
+  const handleFetchRanking = async () => {
+    setIsLoadingRanking(true);
+    try {
+      const res = await jsonp<RankingResponse>({ action: 'getRanking' });
+      if (!res.ok || !res.ranking) {
+        setRanking(null);
+        alert('ランキングの取得に失敗しました');
+        return;
+      }
+      setRanking(res.ranking);
+    } catch (e) {
+      console.error(e);
+      alert('ランキング取得時にエラーが発生しました');
+    } finally {
+      setIsLoadingRanking(false);
+    }
+  };
+
+  // -------------------------
+  // MyPage (manual refresh)
+  // -------------------------
+  const handleFetchMyPage = async () => {
+    if (!userId || !wordsData) return;
+    await prefetchUserData(userId, wordsData.bookId, sessionConfig.deckId);
+  };
+
+  // -------------------------
+  // Update display name
+  // -------------------------
+  const handleUpdateDisplayName = async () => {
+    if (!userId) {
+      alert('ログインしていません');
+      return;
+    }
+    const newName = displayNameEdit.trim();
+    if (!newName) {
+      alert('表示名を入力してください');
+      return;
+    }
+
+    try {
+      const payload = { action: 'updateDisplayName', userId, displayName: newName };
+      await fetch(GAS_ENDPOINT, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload),
+      });
+
+      setDisplayName(newName);
+      setUserOverview((prev) => (prev ? { ...prev, display_name: newName } : prev));
+      localStorage.setItem('auth', JSON.stringify({ userId, displayName: newName }));
+
+      alert('表示名を保存しました');
+    } catch (e) {
+      console.error(e);
+      alert('表示名の更新に失敗しました');
+    }
+  };
+
+  // reset flash card when items change
+  useEffect(() => {
+    setCardIndex(0);
+    setShowCardAnswer(false);
+  }, [viewMode, sessionItems]);
+
+  const goTop = () => {
+    setSessionItems([]);
+    setCurrentPage(0);
+    setShowAnswers(false);
+    setAnswers({});
+    setMarks({});
+    setShowConfigPanel(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // -------------------------
+  // UI
+  // -------------------------
   return (
-    <div style={shellStyle}>
-      <div style={containerStyle}>
-        {/* ブート画面 */}
-        {booting && (
+    <div
+      style={{
+        width: '100%',
+        maxWidth: 1024,
+        margin: '0 auto',
+        padding: '1rem 1.25rem',
+        fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
+        lineHeight: 1.55,
+      }}
+    >
+      <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <h1
+          style={{ margin: 0, cursor: 'pointer', fontSize: '1.6rem' }}
+          onClick={goTop}
+          title="トップへ戻る"
+        >
+          単語テスト
+        </h1>
+        {userId && (
+          <div style={{ fontSize: '0.95rem', color: '#444' }}>
+            {displayName ?? userId}
+          </div>
+        )}
+      </header>
+
+      {/* メッセージ（エラー時のみ軽く出す） */}
+      {message && (
+        <div
+          style={{
+            margin: '0.75rem 0',
+            padding: '0.5rem 0.75rem',
+            borderRadius: 8,
+            background: '#fff3cd',
+            color: '#664d03',
+            fontSize: '0.95rem',
+          }}
+        >
+          {message}
+        </div>
+      )}
+
+      {/* ログイン */}
+      <section
+        style={{
+          marginTop: '1rem',
+          marginBottom: '1rem',
+          padding: '0.9rem',
+          border: '1px solid #e6e6e6',
+          borderRadius: 10,
+          background: '#fafafa',
+        }}
+      >
+        <h2 style={{ fontSize: '1.1rem', marginTop: 0 }}>ログイン</h2>
+
+        {!authReady ? (
+          <div>ログイン状態を確認中…</div>
+        ) : isPostLoginLoading ? (
+          <div>ログイン処理中…</div>
+        ) : userId ? (
+          <div>ログイン中です ✅</div>
+        ) : (
+          <div>
+            <div ref={googleBtnRef} style={{ marginBottom: '0.5rem' }} />
+            <button onClick={handleDebugLogin} style={{ fontSize: '0.9rem' }}>
+              （うまくいかないとき用）デバッグログイン
+            </button>
+          </div>
+        )}
+      </section>
+
+      {!wordsData && <div style={{ marginTop: '1rem' }}>単語データを読み込み中…</div>}
+
+      {/* 出題設定 */}
+      {wordsData && showConfigPanel && (
+        <section
+          style={{
+            marginTop: '1rem',
+            marginBottom: '1.25rem',
+            padding: '1rem',
+            border: '1px solid #eee',
+            borderRadius: 12,
+            background: '#fff',
+          }}
+        >
+          <h2 style={{ fontSize: '1.1rem', marginTop: 0 }}>出題設定</h2>
+
+          {/* モード切り替え */}
+          <div style={{ marginBottom: '0.5rem' }}>
+            <label style={{ marginRight: '1rem' }}>
+              <input
+                type="radio"
+                value="index"
+                checked={sessionConfig.mode === 'index'}
+                onChange={() =>
+                  setSessionConfig((prev) => ({ ...prev, mode: 'index' }))
+                }
+              />{' '}
+              番号指定
+            </label>
+            <label>
+              <input
+                type="radio"
+                value="level"
+                checked={sessionConfig.mode === 'level'}
+                onChange={() =>
+                  setSessionConfig((prev) => ({ ...prev, mode: 'level' }))
+                }
+              />{' '}
+              レベル別
+            </label>
+          </div>
+
           <div
             style={{
-              position: "fixed",
-              inset: 0,
-              background: "rgba(0,0,0,0.35)",
-              display: "grid",
-              placeItems: "center",
-              zIndex: 99999,
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+              gap: '0.75rem',
+              alignItems: 'center',
             }}
           >
-            <div
-              style={{
-                background: "#fff",
-                padding: 20,
-                borderRadius: 12,
-                fontWeight: 800,
-              }}
-            >
-              データ読み込み中...
-            </div>
-          </div>
-        )}
+            <label>
+              セット：
+              <select
+                value={sessionConfig.deckId}
+                onChange={(e) =>
+                  setSessionConfig((prev) => ({
+                    ...prev,
+                    deckId: e.target.value,
+                  }))
+                }
+                style={{ marginLeft: '0.4rem' }}
+              >
+                {Object.values(wordsData.decks).map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.labelJa || d.id}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-        {/* ヘッダー */}
-        <header
+            {sessionConfig.mode === 'index' && (
+              <>
+                <label>
+                  範囲 from:
+                  <input
+                    type="number"
+                    min={1}
+                    value={sessionConfig.startIndex}
+                    onChange={(e) =>
+                      setSessionConfig((prev) => ({
+                        ...prev,
+                        startIndex: Number(e.target.value || 1),
+                      }))
+                    }
+                    style={{ width: '6rem', marginLeft: '0.4rem' }}
+                  />
+                </label>
+                <label>
+                  to:
+                  <input
+                    type="number"
+                    min={1}
+                    value={sessionConfig.endIndex}
+                    onChange={(e) =>
+                      setSessionConfig((prev) => ({
+                        ...prev,
+                        endIndex: Number(e.target.value || prev.startIndex || 1),
+                      }))
+                    }
+                    style={{ width: '6rem', marginLeft: '0.4rem' }}
+                  />
+                </label>
+              </>
+            )}
+
+            {sessionConfig.mode === 'level' && (
+              <label>
+                レベル：
+                <select
+                  value={sessionConfig.level}
+                  onChange={(e) =>
+                    setSessionConfig((prev) => ({
+                      ...prev,
+                      level: e.target.value as LevelFilter,
+                    }))
+                  }
+                  style={{ marginLeft: '0.4rem' }}
+                >
+                  <option value="all">全レベル</option>
+                  <option value="600">600</option>
+                  <option value="730">730</option>
+                  <option value="860">860</option>
+                  <option value="990">990</option>
+                </select>
+              </label>
+            )}
+
+            <label>
+              出題方向：
+              <select
+                value={sessionConfig.direction}
+                onChange={(e) =>
+                  setSessionConfig((prev) => ({
+                    ...prev,
+                    direction: e.target.value as Direction,
+                  }))
+                }
+                style={{ marginLeft: '0.4rem' }}
+              >
+                <option value="en_to_jp">英語 → 日本語</option>
+                <option value="jp_to_en">日本語 → 英語</option>
+              </select>
+            </label>
+
+            <label>
+              1ページの問題数：
+              <select
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value))}
+                style={{ marginLeft: '0.4rem' }}
+              >
+                <option value={1}>1</option>
+                <option value={5}>5</option>
+                <option value={15}>15</option>
+                <option value={30}>30</option>
+                <option value={50}>50</option>
+              </select>
+            </label>
+
+            <label>
+              入力方法：
+              <select
+                value={inputMode}
+                onChange={(e) => setInputMode(e.target.value as InputMode)}
+                style={{ marginLeft: '0.4rem' }}
+              >
+                <option value="text">キーボード入力</option>
+                <option value="handwriting">手書き入力</option>
+              </select>
+            </label>
+
+            <label>
+              表示モード：
+              <select
+                value={viewMode}
+                onChange={(e) => setViewMode(e.target.value as ViewMode)}
+                style={{ marginLeft: '0.4rem' }}
+              >
+                <option value="test">テスト</option>
+                <option value="flash">単語カード</option>
+              </select>
+            </label>
+
+            <label>
+              出題順：
+              <select
+                value={sessionConfig.shuffle ? 'random' : 'sequential'}
+                onChange={(e) =>
+                  setSessionConfig((prev) => ({
+                    ...prev,
+                    shuffle: e.target.value === 'random',
+                  }))
+                }
+                style={{ marginLeft: '0.4rem' }}
+              >
+                <option value="sequential">昇順</option>
+                <option value="random">ランダム</option>
+              </select>
+            </label>
+
+            <label>
+              例文の表示：
+              <select
+                value={sessionConfig.showExamples}
+                onChange={(e) =>
+                  setSessionConfig((prev) => ({
+                    ...prev,
+                    showExamples: e.target.value as ShowExamplesMode,
+                  }))
+                }
+                style={{ marginLeft: '0.4rem' }}
+              >
+                <option value="auto">多義語のみ</option>
+                <option value="always">常に表示</option>
+                <option value="never">表示しない</option>
+              </select>
+            </label>
+          </div>
+
+          <div style={{ marginTop: '0.9rem', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+            <button onClick={handleStartSession}>テスト開始</button>
+            <button onClick={handleStartWrongSession}>間違えた単語だけ復習</button>
+          </div>
+        </section>
+      )}
+
+      {/* 設定再表示ボタン */}
+      {wordsData && !showConfigPanel && (
+        <div style={{ marginBottom: '0.75rem' }}>
+          <button onClick={() => setShowConfigPanel(true)} style={{ fontSize: '0.9rem' }}>
+            出題設定を表示
+          </button>
+        </div>
+      )}
+
+      {wordsData && sessionItems.length === 0 && (
+        <div style={{ marginBottom: '1rem' }}>
+          出題設定をして「テスト開始」または「間違えた単語だけ復習」を押してください。
+        </div>
+      )}
+
+      {/* テストモード */}
+      {wordsData && sessionItems.length > 0 && viewMode === 'test' && (
+        <section
           style={{
-            background: "rgba(255,255,255,0.96)",
-            borderRadius: 14,
-            padding: "10px 12px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
-            marginBottom: 10,
+            marginBottom: '2rem',
+            padding: '1rem',
+            border: '1px solid #eee',
+            borderRadius: 12,
+            background: '#fff',
           }}
         >
-          <div style={{ fontWeight: 800, fontSize: 20 }}>📘 Vocab Sprint</div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <button
-              onClick={() => setShowSettings(true)}
-              style={{ fontSize: 14, padding: "6px 10px", borderRadius: 10 }}
-            >
-              ⚙️ 設定
-            </button>
-            <button
-              onClick={openMyPage}
-              style={{ fontSize: 14, padding: "6px 10px", borderRadius: 10 }}
-            >
-              👤 {user.display_name}
-            </button>
-          </div>
-        </header>
+          <h2 style={{ marginTop: 0 }}>
+            ページ {currentPage + 1} / {totalPages}（{startIndex + 1}〜{endIndex} 問）
+          </h2>
+          <p>
+            <strong>{isEnToJp ? '英語 → 日本語' : '日本語 → 英語'}</strong>
+          </p>
 
-        {/* タブ（トップのみ切替） */}
-        {!testStarted && !cardsStarted && (
-          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-            <button
-              onClick={() => setActiveTab("test")}
-              style={{
-                flex: 1,
-                padding: "10px 0",
-                borderRadius: 12,
-                fontWeight: 700,
-                background: activeTab === "test" ? "#111827" : "#fff",
-                color: activeTab === "test" ? "#fff" : "#111827",
-              }}
-            >
-              ✍️ テスト
-            </button>
-            <button
-              onClick={() => setActiveTab("cards")}
-              style={{
-                flex: 1,
-                padding: "10px 0",
-                borderRadius: 12,
-                fontWeight: 700,
-                background: activeTab === "cards" ? "#111827" : "#fff",
-                color: activeTab === "cards" ? "#fff" : "#111827",
-              }}
-            >
-              🃏 単語カード
-            </button>
-          </div>
-        )}
+          {pageItems.map((word, idx) => {
+            const absIndex = startIndex + idx;
+            const answerValue = answers[absIndex] ?? '';
+            const mark = marks[absIndex];
+            const showExample = shouldShowExampleInQuestion(word);
 
-        {/* メイン */}
-        <main
-          style={{
-            background: "rgba(255,255,255,0.97)",
-            borderRadius: 14,
-            padding: isPortrait ? 10 : 14,
-            boxShadow: "0 6px 18px rgba(0,0,0,0.12)",
-          }}
-        >
-          {loadingWords && <div>単語データ読み込み中...</div>}
-          {wordsError && (
-            <div style={{ color: "crimson", fontWeight: 700 }}>
-              単語データ取得エラー: {wordsError}
-            </div>
-          )}
+            return (
+              <div
+                key={word.id}
+                style={{
+                  marginBottom: '1rem',
+                  paddingBottom: '0.75rem',
+                  borderBottom: '1px dashed #eee',
+                }}
+              >
+                <div style={{ fontSize: '1.1rem' }}>
+                  問題 {absIndex + 1}.{' '}
+                  <strong>{isEnToJp ? word.english : word.japanese}</strong>
 
-          {/* ===== テストタブ ===== */}
-          {!loadingWords && activeTab === "test" && (
-            <>
-              {!testStarted && (
-                <section style={{ marginBottom: 12 }}>
-                  <h2 style={{ fontSize: 18, marginBottom: 6 }}>🧩 出題設定</h2>
+                  {/* 単語読み上げ（テストモード復活） */}
+                  {isEnToJp && (
+                    <button
+                      type="button"
+                      onClick={() => speakEnglish(word.audio_text || word.english)}
+                      style={{ marginLeft: '0.5rem', fontSize: '0.8rem' }}
+                    >
+                      🔊 単語
+                    </button>
+                  )}
 
-                  <div style={{ display: "grid", gap: 8 }}>
+                  {/* 例文読み上げ：表示しているときだけ */}
+                  {showExample && word.example_en && (
+                    <button
+                      type="button"
+                      onClick={() => speakEnglish(word.example_en)}
+                      style={{ marginLeft: '0.25rem', fontSize: '0.8rem' }}
+                    >
+                      🔊 例文
+                    </button>
+                  )}
+                </div>
+
+                {showExample && (
+                  <div style={{ fontStyle: 'italic', color: '#555' }}>
+                    例文: {isEnToJp ? word.example_en : word.example_jp}
+                  </div>
+                )}
+
+                <div style={{ marginTop: '0.25rem' }}>
+                  {inputMode === 'text' ? (
                     <label>
-                      単語帳：
-                      <select
-                        value={selectedBookId}
-                        onChange={(e) => {
-                          setSelectedBookId(e.target.value);
-                          const b = books.find(
-                            (x) => x.bookId === e.target.value
-                          );
-                          const first = b ? Object.keys(b.decks)[0] : "core";
-                          setSelectedSetId(first);
-                        }}
-                      >
-                        {books.map((b) => (
-                          <option key={b.bookId} value={b.bookId}>
-                            {b.bookName}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label>
-                      セット：
-                      <select
-                        value={selectedSetId}
-                        onChange={(e) => setSelectedSetId(e.target.value)}
-                      >
-                        {selectedBook &&
-                          Object.values(selectedBook.decks).map((d) => (
-                            <option key={d.id} value={d.id}>
-                              {d.id === "core" ? "本編" : d.labelJa}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
-
-                    {isCoreSelected ? (
-                      <>
-                        <label>
-                          出題モード：
-                          <select
-                            value={testMode}
-                            onChange={(e) =>
-                              setTestMode(e.target.value as any)
-                            }
-                          >
-                            <option value="level">レベル別</option>
-                            <option value="number">番号範囲</option>
-                          </select>
-                        </label>
-
-                        {testMode === "level" ? (
-                          <label>
-                            レベル：
-                            <select
-                              value={level}
-                              onChange={(e) => setLevel(e.target.value)}
-                            >
-                              {["600", "730", "860", "990"].map((lv) => (
-                                <option key={lv} value={lv}>
-                                  {lv}点
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        ) : (
-                          <div style={{ display: "flex", gap: 8 }}>
-                            <label style={{ flex: 1 }}>
-                              範囲開始：
-                              <input
-                                type="number"
-                                value={rangeStart}
-                                min={1}
-                                max={1000}
-                                onChange={(e) =>
-                                  setRangeStart(Number(e.target.value))
-                                }
-                              />
-                            </label>
-                            <label style={{ flex: 1 }}>
-                              範囲終了：
-                              <input
-                                type="number"
-                                value={rangeEnd}
-                                min={1}
-                                max={1000}
-                                onChange={(e) =>
-                                  setRangeEnd(Number(e.target.value))
-                                }
-                              />
-                            </label>
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <label>
-                        サブカテゴリ：
-                        <select
-                          value={subCat}
-                          onChange={(e) => setSubCat(e.target.value)}
-                        >
-                          {subCategoryList.map((s) => (
-                            <option key={s} value={s}>
-                              {s === "all" ? "すべて" : s}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    )}
-
-                    <label>
-                      間違えた単語だけ出す：
+                      あなたの答え：
                       <input
-                        type="checkbox"
-                        checked={mistakeOnly}
-                        onChange={(e) => setMistakeOnly(e.target.checked)}
-                        style={{ marginLeft: 6 }}
+                        type="text"
+                        value={answerValue}
+                        onChange={(e) =>
+                          setAnswers((prev) => ({
+                            ...prev,
+                            [absIndex]: e.target.value,
+                          }))
+                        }
+                        style={{ marginLeft: '0.5rem', width: '70%', maxWidth: 420 }}
+                        placeholder={isEnToJp ? '日本語の意味' : '英語の単語'}
                       />
                     </label>
-
-                    <button
-                      onClick={startTest}
-                      style={{
-                        marginTop: 6,
-                        padding: "10px 0",
-                        borderRadius: 12,
-                        fontWeight: 800,
-                        background: "#111827",
-                        color: "#fff",
-                      }}
-                    >
-                      🚀 テスト開始
-                    </button>
-
-                    <div style={{ fontSize: 12, color: "#555" }}>
-                      想定問題数：{buildTestList().length} 問
+                  ) : (
+                    <div>
+                      <div style={{ marginBottom: '0.25rem' }}>手書きで回答：</div>
+                      <HandwritingCanvas height={140} />
                     </div>
-                  </div>
-                </section>
-              )}
+                  )}
+                </div>
 
-              {testStarted && (
-                <section ref={testTopRef}>
+                {showAnswers && (
                   <div
                     style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      marginBottom: 8,
+                      marginTop: '0.35rem',
+                      padding: '0.5rem',
+                      border: '1px solid #f0f0f0',
+                      borderRadius: 8,
+                      background: '#fafafa',
                     }}
                   >
-                    <div style={{ fontWeight: 700 }}>
-                      ページ {pageIndex + 1}/{pages}（{questions.length}問）
+                    <div>
+                      正解：{isEnToJp ? word.japanese : word.english}
                     </div>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button onClick={prevPage} disabled={pageIndex === 0}>
-                        ← 前へ
+                    {word.example_jp && (
+                      <div style={{ fontSize: '0.9rem', marginTop: '0.2rem' }}>
+                        例文（日本語）：{word.example_jp}
+                      </div>
+                    )}
+                    {word.example_en && (
+                      <div style={{ fontSize: '0.9rem' }}>
+                        例文（英語）：{word.example_en}
+                      </div>
+                    )}
+
+                    <div style={{ marginTop: '0.35rem' }}>
+                      自己採点：
+                      <button
+                        onClick={() =>
+                          setMarks((prev) => ({ ...prev, [absIndex]: 'correct' }))
+                        }
+                        style={{
+                          marginLeft: '0.5rem',
+                          fontWeight: mark === 'correct' ? 'bold' : 'normal',
+                          background: mark === 'correct' ? '#d1e7dd' : undefined,
+                          borderRadius: 6,
+                          padding: '0.15rem 0.5rem',
+                        }}
+                      >
+                        ○ 正解
                       </button>
                       <button
                         onClick={() =>
-                          setPageIndex((p) => Math.min(p + 1, pages - 1))
+                          setMarks((prev) => ({ ...prev, [absIndex]: 'wrong' }))
                         }
-                        disabled={pageIndex >= pages - 1}
-                      >
-                        次へ →
-                      </button>
-                    </div>
-                  </div>
-
-                  {pageQuestions.map((q, idx) => (
-                    <div
-                      key={q.id}
-                      style={{
-                        padding: 10,
-                        borderRadius: 12,
-                        border: "1px solid #e5e7eb",
-                        marginBottom: 10,
-                        background: "#fff",
-                      }}
-                    >
-                      <div style={{ fontWeight: 800, marginBottom: 4 }}>
-                        問題 {pageIndex * pageSize + idx + 1}
-                      </div>
-
-                      <div
                         style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          fontSize: 20,
-                          fontWeight: 800,
+                          marginLeft: '0.5rem',
+                          fontWeight: mark === 'wrong' ? 'bold' : 'normal',
+                          background: mark === 'wrong' ? '#f8d7da' : undefined,
+                          borderRadius: 6,
+                          padding: '0.15rem 0.5rem',
                         }}
                       >
-                        {q.english}
-                        <button
-                          onClick={() => speak(q.english, "en-US")}
-                          style={{ fontSize: 14 }}
-                        >
-                          🔊
-                        </button>
-                      </div>
-
-                      {showExampleForItem(q) && q.example_en && (
-                        <div style={{ color: "#444", marginTop: 6 }}>
-                          例文: {q.example_en}
-                        </div>
-                      )}
-
-                      <div style={{ marginTop: 8 }}>
-                        {settings.inputMethod !== "handwrite" && (
-                          <input
-                            type="text"
-                            placeholder="日本語で答える"
-                            style={{ width: "100%", padding: 8, fontSize: 16 }}
-                            value={answersText[q.id] || ""}
-                            onChange={(e) =>
-                              setAnswersText({
-                                ...answersText,
-                                [q.id]: e.target.value,
-                              })
-                            }
-                            disabled={grading}
-                          />
-                        )}
-
-                        {settings.inputMethod !== "keyboard" && (
-                          <div style={{ marginTop: 6 }}>
-                            <HandwritingCanvas height={110} />
-                          </div>
-                        )}
-                      </div>
-
-                      {grading && (
-                        <>
-                          <div
-                            style={{
-                              marginTop: 8,
-                              padding: 8,
-                              background: "#f3f4f6",
-                              borderRadius: 8,
-                              fontSize: 14,
-                            }}
-                          >
-                            正解：{q.japanese}
-                          </div>
-
-                          <div
-                            style={{
-                              marginTop: 8,
-                              display: "flex",
-                              gap: 10,
-                              alignItems: "center",
-                              fontWeight: 700,
-                            }}
-                          >
-                            <label
-                              style={{
-                                padding: "6px 10px",
-                                borderRadius: 999,
-                                background:
-                                  (results[q.id] ?? true) ? "#dcfce7" : "#fff",
-                                border: "1px solid #10b981",
-                                cursor: "pointer",
-                              }}
-                            >
-                              <input
-                                type="radio"
-                                checked={results[q.id] ?? true}
-                                onChange={() =>
-                                  setResults({ ...results, [q.id]: true })
-                                }
-                              />
-                              正解
-                            </label>
-                            <label
-                              style={{
-                                padding: "6px 10px",
-                                borderRadius: 999,
-                                background:
-                                  results[q.id] === false
-                                    ? "#fee2e2"
-                                    : "#fff",
-                                border: "1px solid #ef4444",
-                                cursor: "pointer",
-                              }}
-                            >
-                              <input
-                                type="radio"
-                                checked={results[q.id] === false}
-                                onChange={() =>
-                                  setResults({ ...results, [q.id]: false })
-                                }
-                              />
-                              不正解
-                            </label>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  ))}
-
-                  {!grading ? (
-                    <button
-                      onClick={beginGrading}
-                      style={{
-                        width: "100%",
-                        padding: "10px 0",
-                        borderRadius: 12,
-                        fontWeight: 800,
-                        background: "#111827",
-                        color: "#fff",
-                      }}
-                    >
-                      ✅ 採点開始
-                    </button>
-                  ) : (
-                    <button
-                      onClick={submitPageAndNext}
-                      style={{
-                        width: "100%",
-                        padding: "10px 0",
-                        borderRadius: 12,
-                        fontWeight: 800,
-                        background: "#111827",
-                        color: "#fff",
-                      }}
-                    >
-                      {pageIndex < pages - 1
-                        ? "次のページへ"
-                        : "テスト終了"}
-                    </button>
-                  )}
-                </section>
-              )}
-            </>
-          )}
-
-          {/* ===== 単語カードタブ ===== */}
-          {!loadingWords && activeTab === "cards" && (
-            <>
-              {!cardsStarted && (
-                <section style={{ marginBottom: 12 }}>
-                  <h2 style={{ fontSize: 18, marginBottom: 6 }}>🃏 カード設定</h2>
-                  <div style={{ display: "grid", gap: 8 }}>
-                    <label>
-                      単語帳：
-                      <select
-                        value={selectedBookId}
-                        onChange={(e) => {
-                          setSelectedBookId(e.target.value);
-                          const b = books.find(
-                            (x) => x.bookId === e.target.value
-                          );
-                          const first = b ? Object.keys(b.decks)[0] : "core";
-                          setSelectedSetId(first);
-                        }}
-                      >
-                        {books.map((b) => (
-                          <option key={b.bookId} value={b.bookId}>
-                            {b.bookName}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label>
-                      セット：
-                      <select
-                        value={selectedSetId}
-                        onChange={(e) => setSelectedSetId(e.target.value)}
-                      >
-                        {selectedBook &&
-                          Object.values(selectedBook.decks).map((d) => (
-                            <option key={d.id} value={d.id}>
-                              {d.id === "core" ? "本編" : d.labelJa}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
-
-                    {isCoreSelected ? (
-                      <>
-                        <label>
-                          範囲指定：
-                          <select
-                            value={cardMode}
-                            onChange={(e) =>
-                              setCardMode(e.target.value as any)
-                            }
-                          >
-                            <option value="level">レベル別</option>
-                            <option value="number">番号範囲</option>
-                          </select>
-                        </label>
-
-                        {cardMode === "level" ? (
-                          <label>
-                            レベル：
-                            <select
-                              value={cardLevel}
-                              onChange={(e) => setCardLevel(e.target.value)}
-                            >
-                              {["600", "730", "860", "990"].map((lv) => (
-                                <option key={lv} value={lv}>
-                                  {lv}点
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        ) : (
-                          <div style={{ display: "flex", gap: 8 }}>
-                            <label style={{ flex: 1 }}>
-                              範囲開始：
-                              <input
-                                type="number"
-                                value={cardRangeStart}
-                                min={1}
-                                max={1000}
-                                onChange={(e) =>
-                                  setCardRangeStart(Number(e.target.value))
-                                }
-                              />
-                            </label>
-                            <label style={{ flex: 1 }}>
-                              範囲終了：
-                              <input
-                                type="number"
-                                value={cardRangeEnd}
-                                min={1}
-                                max={1000}
-                                onChange={(e) =>
-                                  setCardRangeEnd(Number(e.target.value))
-                                }
-                              />
-                            </label>
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <label>
-                        サブカテゴリ：
-                        <select
-                          value={cardSubCat}
-                          onChange={(e) => setCardSubCat(e.target.value)}
-                        >
-                          {subCategoryList.map((s) => (
-                            <option key={s} value={s}>
-                              {s === "all" ? "すべて" : s}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    )}
-
-                    <label>
-                      間違えた単語だけ：
-                      <input
-                        type="checkbox"
-                        checked={cardMistakeOnly}
-                        onChange={(e) => setCardMistakeOnly(e.target.checked)}
-                        style={{ marginLeft: 6 }}
-                      />
-                    </label>
-
-                    <button
-                      onClick={startCards}
-                      style={{
-                        marginTop: 6,
-                        padding: "10px 0",
-                        borderRadius: 12,
-                        fontWeight: 800,
-                        background: "#111827",
-                        color: "#fff",
-                      }}
-                    >
-                      🃏 カード開始
-                    </button>
-
-                    <div style={{ fontSize: 12, color: "#555" }}>
-                      想定カード数：{buildCardsList().length} 枚
-                    </div>
-                  </div>
-                </section>
-              )}
-
-              {cardsStarted && currentCard && (
-                <section
-                  ref={cardFs.ref}
-                  style={
-                    cardPseudoFs
-                      ? {
-                          position: "fixed",
-                          inset: 0,
-                          background: "#fff",
-                          zIndex: 9999,
-                          padding: 14,
-                          overflow: "auto",
-                        }
-                      : undefined
-                  }
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      marginBottom: 8,
-                    }}
-                  >
-                    <div style={{ fontWeight: 700 }}>
-                      {cardIndex + 1}/{cardsList.length}
-                    </div>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button
-                        onClick={() => {
-                          if (cardFs.supportsFs) {
-                            cardFs.isFs ? cardFs.exit() : cardFs.enter();
-                          } else {
-                            setCardPseudoFs((p) => !p);
-                          }
-                        }}
-                      >
-                        {(cardFs.supportsFs ? cardFs.isFs : cardPseudoFs)
-                          ? "全画面解除"
-                          : "全画面"}
-                      </button>
-
-                      <button onClick={openDrive}>🚗 ドライブモード</button>
-                    </div>
-                  </div>
-
-                  <div
-                    style={{
-                      padding: 16,
-                      borderRadius: 14,
-                      border: "1px solid #e5e7eb",
-                      background: "#fff",
-                      textAlign: "center",
-                      minHeight:
-                        (cardFs.supportsFs && cardFs.isFs) || cardPseudoFs
-                          ? "70vh"
-                          : 220,
-                      display: "grid",
-                      placeItems: "center",
-                      fontSize:
-                        (cardFs.supportsFs && cardFs.isFs) || cardPseudoFs
-                          ? 52
-                          : 28,
-                      fontWeight: 800,
-                    }}
-                    onClick={() =>
-                      setCardSide((s) => (s === "front" ? "back" : "front"))
-                    }
-                  >
-                    {cardSide === "front"
-                      ? currentCard.english
-                      : currentCard.japanese}
-                  </div>
-
-                  <div
-                    style={{
-                      marginTop: 10,
-                      display: "flex",
-                      justifyContent: "space-between",
-                    }}
-                  >
-                    <button
-                      onClick={() => {
-                        setCardIndex((i) =>
-                          i > 0 ? i - 1 : cardsList.length - 1
-                        );
-                        setCardSide("front");
-                      }}
-                    >
-                      ← 前
-                    </button>
-
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button onClick={() => speak(currentCard.english, "en-US")}>
-                        🔊 英語
-                      </button>
-                      <button
-                        onClick={() => speak(currentCard.japanese, "ja-JP")}
-                      >
-                        🔊 日本語
+                        × 不正解
                       </button>
                     </div>
-
-                    <button
-                      onClick={() => {
-                        setCardIndex((i) =>
-                          i < cardsList.length - 1 ? i + 1 : 0
-                        );
-                        setCardSide("front");
-                      }}
-                    >
-                      次 →
-                    </button>
                   </div>
-                </section>
-              )}
-            </>
-          )}
-        </main>
-
-        {/* 設定モーダル */}
-        {showSettings && (
-          <Modal onClose={() => setShowSettings(false)} title="⚙️ 設定">
-            <div style={{ display: "grid", gap: 10 }}>
-              <label>
-                1ページの問題数：
-                <select
-                  value={draftSettings.pageSize}
-                  onChange={(e) =>
-                    setDraftSettings({
-                      ...draftSettings,
-                      pageSize: Number(e.target.value) as any,
-                    })
-                  }
-                >
-                  {[1, 5, 15, 30, 50].map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                出題順：
-                <select
-                  value={draftSettings.randomOrder ? "random" : "seq"}
-                  onChange={(e) =>
-                    setDraftSettings({
-                      ...draftSettings,
-                      randomOrder: e.target.value === "random",
-                    })
-                  }
-                >
-                  <option value="random">ランダム</option>
-                  <option value="seq">番号順</option>
-                </select>
-              </label>
-
-              <label>
-                例文の表示：
-                <select
-                  value={draftSettings.showExamplesMode}
-                  onChange={(e) =>
-                    setDraftSettings({
-                      ...draftSettings,
-                      showExamplesMode: e.target.value as any,
-                    })
-                  }
-                >
-                  <option value="polysemyOnly">多義語のみ</option>
-                  <option value="always">常に表示</option>
-                  <option value="never">表示しない</option>
-                </select>
-              </label>
-
-              <label>
-                入力方法：
-                <select
-                  value={draftSettings.inputMethod}
-                  onChange={(e) =>
-                    setDraftSettings({
-                      ...draftSettings,
-                      inputMethod: e.target.value as any,
-                    })
-                  }
-                >
-                  <option value="handwrite">手書き</option>
-                  <option value="keyboard">キーボード</option>
-                  <option value="both">両方</option>
-                </select>
-              </label>
-
-              <label>
-                ドライブ速度(デフォルト)：
-                <input
-                  type="range"
-                  min={0.6}
-                  max={1.4}
-                  step={0.1}
-                  value={draftSettings.driveRate}
-                  onChange={(e) =>
-                    setDraftSettings({
-                      ...draftSettings,
-                      driveRate: Number(e.target.value),
-                    })
-                  }
-                />
-                {draftSettings.driveRate.toFixed(1)}x
-              </label>
-
-              <label>
-                ドライブの次表示までの待ち(ms)：
-                <input
-                  type="number"
-                  min={200}
-                  max={3000}
-                  step={100}
-                  value={draftSettings.driveDelayMs}
-                  onChange={(e) =>
-                    setDraftSettings({
-                      ...draftSettings,
-                      driveDelayMs: Number(e.target.value),
-                    })
-                  }
-                />
-              </label>
-
-              <div>
-                <div style={{ fontWeight: 700, marginBottom: 4 }}>
-                  ドライブモードの表示順
-                </div>
-                {["english", "japanese", "example_en", "example_jp"].map(
-                  (f) => (
-                    <label key={f} style={{ display: "block" }}>
-                      <input
-                        type="checkbox"
-                        checked={draftSettings.driveOrder.includes(f as any)}
-                        onChange={(e) => {
-                          const on = e.target.checked;
-                          setDraftSettings((s) => {
-                            const cur = s.driveOrder;
-                            const nf = f as any;
-                            if (on && !cur.includes(nf))
-                              return { ...s, driveOrder: [...cur, nf] };
-                            if (!on)
-                              return {
-                                ...s,
-                                driveOrder: cur.filter((x) => x !== nf),
-                              };
-                            return s;
-                          });
-                        }}
-                      />
-                      {f === "english" && "英単語"}
-                      {f === "japanese" && "日本語訳"}
-                      {f === "example_en" && "例文(英語)"}
-                      {f === "example_jp" && "例文(日本語)"}
-                    </label>
-                  )
                 )}
               </div>
+            );
+          })}
 
-              <button
-                onClick={saveSettings}
-                style={{
-                  marginTop: 6,
-                  padding: "10px 0",
-                  borderRadius: 12,
-                  fontWeight: 800,
-                  background: "#111827",
-                  color: "#fff",
-                }}
-              >
-                保存
-              </button>
-            </div>
-          </Modal>
-        )}
+          <div>
+            <button onClick={handleShowAnswersForPage}>
+              このページの解答を表示（未採点はデフォルトで○）
+            </button>
+          </div>
 
-        {/* マイページモーダル */}
-        {showMyPage && overview && (
-          <Modal onClose={() => setShowMyPage(false)} title="👤 マイページ">
-            <div style={{ display: "grid", gap: 10 }}>
-              <div style={{ fontWeight: 700 }}>
-                今週の正解数：{overview.weekly_correct_total}
-              </div>
-              <div style={{ fontWeight: 700 }}>
-                累計の正解数：{overview.total_correct}
-              </div>
+          <div style={{ marginTop: '0.75rem' }}>
+            <button onClick={handleSaveCurrentPage} disabled={isSavingPage || pageItems.length === 0}>
+              このページの採点を保存して
+              {currentPage + 1 < totalPages ? '次のページへ' : 'セッション終了'}
+            </button>
+          </div>
+        </section>
+      )}
 
-              <div>
-                <div style={{ fontWeight: 800, marginBottom: 4 }}>
-                  表示名を変更
-                </div>
-                <NameEditor
-                  initial={overview.display_name}
-                  onSave={updateDisplayName}
-                />
-              </div>
+      {/* 単語カード */}
+      {wordsData && sessionItems.length > 0 && viewMode === 'flash' && (
+        <section
+          style={{
+            marginBottom: '2rem',
+            padding: '1rem',
+            border: '1px solid #eee',
+            borderRadius: 12,
+            background: '#fff',
+          }}
+        >
+          <h2 style={{ marginTop: 0 }}>単語カード</h2>
+          <p>
+            全 {sessionItems.length} 枚 / 現在 {cardIndex + 1} 枚目（
+            {isEnToJp ? '英語 → 日本語' : '日本語 → 英語'}）
+          </p>
 
-              <div>
-                <div style={{ fontWeight: 800, marginBottom: 4 }}>
-                  苦手な単語
-                </div>
-                {wrongItems.length === 0 && (
-                  <div style={{ fontSize: 14, color: "#555" }}>
-                    まだありません
-                  </div>
-                )}
-                {wrongItems.map((w) => {
-                  const it = allItems.find((x) => x.id === w.item_id);
-                  if (!it) return null;
-                  return (
-                    <div
-                      key={w.item_id}
-                      style={{
-                        padding: 8,
-                        border: "1px solid #eee",
-                        borderRadius: 8,
-                        marginBottom: 6,
-                        background: "#fff",
-                      }}
-                    >
-                      <div style={{ fontWeight: 800 }}>{it.english}</div>
-                      <div style={{ color: "#555" }}>{it.japanese}</div>
-                      <div style={{ fontSize: 12, color: "#777" }}>
-                        間違えた回数: {w.wrong_total}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </Modal>
-        )}
-
-        {/* ドライブモード overlay */}
-        {driveOpen && currentCard && (
-          <div
-            ref={driveFs.ref}
-            style={{
-              position: "fixed",
-              inset: 0,
-              background: "#000",
-              display: "grid",
-              placeItems: "center",
-              zIndex: 99999,
-              color: "#fff",
-              padding: 16,
-            }}
-          >
+          {sessionItems[cardIndex] && (
             <div
               style={{
-                width: "100%",
-                maxWidth: 900,
-                textAlign: "center",
+                border: '1px solid #ddd',
+                borderRadius: 12,
+                padding: '1rem',
+                background: '#fffdf8',
+                minHeight: '140px',
               }}
             >
-              <div
-                style={{
-                  fontSize: driveFs.isFs ? "min(12vw, 88px)" : 44,
-                  fontWeight: 900,
-                  lineHeight: 1.2,
-                  marginBottom: 16,
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                {getFieldText(currentCard, driveFields[driveFieldIndex])}
+              <div style={{ fontSize: '1.35rem', marginBottom: '0.5rem' }}>
+                <strong>
+                  {isEnToJp ? sessionItems[cardIndex].english : sessionItems[cardIndex].japanese}
+                </strong>
               </div>
 
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ fontWeight: 700, marginBottom: 4 }}>
-                  再生速度：{driveRateLocal.toFixed(1)}x
-                </div>
-                <input
-                  type="range"
-                  min={0.6}
-                  max={1.4}
-                  step={0.1}
-                  value={driveRateLocal}
-                  onChange={(e) => setDriveRateLocal(Number(e.target.value))}
-                  style={{ width: "70%" }}
-                />
-              </div>
-
-              <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-                <button
-                  onClick={() => setDrivePlaying((p) => !p)}
-                  style={{ padding: "8px 14px", fontWeight: 800 }}
-                >
-                  {drivePlaying ? "⏸ 停止" : "▶ 再生"}
-                </button>
-                <button
-                  onClick={() => {
-                    setDriveFieldIndex(0);
-                    setCardIndex((i) =>
-                      i > 0 ? i - 1 : cardsList.length - 1
-                    );
-                  }}
-                  style={{ padding: "8px 14px", fontWeight: 800 }}
-                >
-                  ⏮ 前
-                </button>
-                <button
-                  onClick={() => {
-                    setDriveFieldIndex(0);
-                    setCardIndex((i) =>
-                      i < cardsList.length - 1 ? i + 1 : 0
-                    );
-                  }}
-                  style={{ padding: "8px 14px", fontWeight: 800 }}
-                >
-                  ⏭ 次
-                </button>
-
-                {driveFs.supportsFs && (
+              <div style={{ marginBottom: '0.5rem' }}>
+                {isEnToJp && (
                   <button
+                    type="button"
                     onClick={() =>
-                      driveFs.isFs ? driveFs.exit() : driveFs.enter()
+                      speakEnglish(sessionItems[cardIndex].audio_text || sessionItems[cardIndex].english)
                     }
-                    style={{ padding: "8px 14px", fontWeight: 800 }}
+                    style={{ marginRight: '0.5rem', fontSize: '0.85rem' }}
                   >
-                    {driveFs.isFs ? "全画面解除" : "全画面"}
+                    🔊 単語
                   </button>
                 )}
-
-                <button
-                  onClick={() => setDriveOpen(false)}
-                  style={{ padding: "8px 14px", fontWeight: 800 }}
-                >
-                  ✖ 閉じる
-                </button>
+                {sessionItems[cardIndex].example_en && (
+                  <button
+                    type="button"
+                    onClick={() => speakEnglish(sessionItems[cardIndex].example_en)}
+                    style={{ fontSize: '0.85rem' }}
+                  >
+                    🔊 例文
+                  </button>
+                )}
               </div>
+
+              <button type="button" onClick={() => setShowCardAnswer((prev) => !prev)}>
+                {showCardAnswer ? '答えを隠す' : '答えを表示'}
+              </button>
+
+              {showCardAnswer && (
+                <div style={{ marginTop: '0.75rem' }}>
+                  <div>
+                    答え：
+                    <strong>
+                      {isEnToJp ? sessionItems[cardIndex].japanese : sessionItems[cardIndex].english}
+                    </strong>
+                  </div>
+                  {sessionItems[cardIndex].example_jp && (
+                    <div style={{ marginTop: '0.25rem', fontSize: '0.95rem' }}>
+                      例文（日本語）：{sessionItems[cardIndex].example_jp}
+                    </div>
+                  )}
+                  {sessionItems[cardIndex].example_en && (
+                    <div style={{ fontSize: '0.95rem' }}>
+                      例文（英語）：{sessionItems[cardIndex].example_en}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem' }}>
+            <button
+              type="button"
+              onClick={() => {
+                setCardIndex((prev) => (prev === 0 ? sessionItems.length - 1 : prev - 1));
+                setShowCardAnswer(false);
+              }}
+            >
+              ← 前へ
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setCardIndex((prev) => (prev + 1 >= sessionItems.length ? 0 : prev + 1));
+                setShowCardAnswer(false);
+              }}
+            >
+              次へ →
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* マイページ */}
+      <section
+        style={{
+          marginBottom: '2rem',
+          padding: '1rem',
+          border: '1px solid #eee',
+          borderRadius: 12,
+          background: '#fff',
+        }}
+      >
+        <h2 style={{ fontSize: '1.1rem', marginTop: 0 }}>マイページ</h2>
+
+        {!userId && <div>ログインすると記録が表示されます。</div>}
+
+        {userId && (
+          <button
+            onClick={handleFetchMyPage}
+            disabled={isLoadingOverview || isLoadingMyPageWrong}
+            style={{ fontSize: '0.9rem' }}
+          >
+            {isLoadingOverview || isLoadingMyPageWrong ? '読み込み中…' : '記録を更新'}
+          </button>
+        )}
+
+        {userOverview && (
+          <div style={{ marginTop: '0.75rem' }}>
+            <div>
+              ユーザー：<strong>{userOverview.display_name}</strong>
+            </div>
+            <div style={{ marginTop: '0.25rem' }}>
+              累計 正解：{userOverview.total_correct} / 不正解：{userOverview.total_wrong}
+            </div>
+            <div>今週の正解数：{userOverview.weekly_correct_total}</div>
+            <div>
+              最終回答日時：{formatDateTime(userOverview.last_answered_at ?? undefined)}
             </div>
           </div>
         )}
-      </div>
-    </div>
-  );
-}
 
-/* ================================
-   小コンポーネント
-================================ */
-function Modal({
-  title,
-  onClose,
-  children,
-}: {
-  title: string;
-  onClose: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.25)",
-        display: "grid",
-        placeItems: "center",
-        zIndex: 9999,
-        padding: 10,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
+        {/* 表示名変更 */}
+        {userId && (
+          <div style={{ marginTop: '1rem' }}>
+            <h3 style={{ fontSize: '1rem' }}>表示名の変更</h3>
+            <div>
+              <input
+                type="text"
+                value={displayNameEdit}
+                onChange={(e) => setDisplayNameEdit(e.target.value)}
+                placeholder="ランキングなどに表示する名前"
+                style={{ width: '60%', maxWidth: 280, marginRight: '0.5rem' }}
+              />
+              <button type="button" onClick={handleUpdateDisplayName}>保存</button>
+            </div>
+          </div>
+        )}
+
+        {/* よく間違える単語 */}
+        {userId && (
+          <div style={{ marginTop: '1rem' }}>
+            <h3 style={{ fontSize: '1rem' }}>よく間違える単語 Top10</h3>
+            {!myPageWrongItems && !isLoadingMyPageWrong && <p>まだ苦手単語が記録されていません。</p>}
+            {myPageWrongItems && myPageWrongItems.length === 0 && <p>まだ苦手単語が記録されていません。</p>}
+            {myPageWrongItems && myPageWrongItems.length > 0 && wordsData && (
+              <ol style={{ marginTop: '0.5rem' }}>
+                {myPageWrongItems.map((stat) => {
+                  const deck = wordsData.decks[stat.deck] || wordsData.decks['core'];
+                  const word = deck.items.find((w) => w.id === stat.item_id);
+                  return (
+                    <li key={stat.item_id} style={{ marginBottom: '0.3rem' }}>
+                      {word ? (
+                        <>
+                          <strong>{word.english}</strong> / {word.japanese}（
+                          間違え {stat.wrong_total} 回 / 正解 {stat.correct_total} 回）
+                        </>
+                      ) : (
+                        <>item_id: {stat.item_id}（単語データなし）</>
+                      )}
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* ランキング */}
+      <section
         style={{
-          width: "100%",
-          maxWidth: 560,
-          background: "#fff",
-          borderRadius: 14,
-          padding: 14,
-          boxShadow: "0 10px 30px rgba(0,0,0,0.2)",
+          marginBottom: '2rem',
+          padding: '1rem',
+          border: '1px solid #eee',
+          borderRadius: 12,
+          background: '#fff',
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            marginBottom: 8,
-          }}
-        >
-          <div style={{ fontWeight: 900 }}>{title}</div>
-          <button onClick={onClose}>✖</button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
+        <h2 style={{ fontSize: '1.1rem', marginTop: 0 }}>ランキング（今週の正解数）</h2>
+        <button onClick={handleFetchRanking} disabled={isLoadingRanking}>
+          {isLoadingRanking ? 'ランキング取得中…' : 'ランキングを更新'}
+        </button>
 
-function NameEditor({
-  initial,
-  onSave,
-}: {
-  initial: string;
-  onSave: (name: string) => Promise<boolean> | boolean;
-}) {
-  const [v, setV] = useState(initial);
-  const [saving, setSaving] = useState(false);
+        {ranking && ranking.length === 0 && (
+          <p style={{ marginTop: '0.5rem' }}>まだ今週の正解記録がありません。</p>
+        )}
 
-  return (
-    <div style={{ display: "flex", gap: 6 }}>
-      <input
-        value={v}
-        onChange={(e) => setV(e.target.value)}
-        style={{ flex: 1, padding: 8, fontSize: 16 }}
-      />
-      <button
-        disabled={saving}
-        onClick={async () => {
-          setSaving(true);
-          try {
-            await onSave(v);
-          } finally {
-            setSaving(false);
-          }
-        }}
-        style={{ fontWeight: 800 }}
-      >
-        保存
-      </button>
+        {ranking && ranking.length > 0 && (
+          <ol style={{ marginTop: '0.75rem' }}>
+            {ranking.slice(0, 20).map((entry, index) => (
+              <li key={entry.user_id} style={{ marginBottom: '0.25rem' }}>
+                {index + 1}位：{entry.display_name} さん（{entry.weekly_correct_total} 問）
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
     </div>
   );
 }

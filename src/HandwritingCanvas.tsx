@@ -1,249 +1,180 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
-type HandwritingCanvasProps = {
+type Point = { x: number; y: number };
+type Stroke = Point[];
+
+type Props = {
   height?: number;
+  onChangeStrokes?: (strokes: Stroke[]) => void;
 };
 
-const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
-  height = 160,
-}) => {
+export default function HandwritingCanvas({ height = 160, onChangeStrokes }: Props) {
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const [strokes, setStrokes] = useState<Stroke[]>([]);
+  const [current, setCurrent] = useState<Stroke | null>(null);
 
-  const isDrawingRef = useRef(false);
-  const lastPointRef = useRef<{ x: number; y: number; p: number } | null>(null);
+  // penで描いてる間だけスクロール禁止にするためのフラグ
+  const drawingPointerIdRef = useRef<number | null>(null);
 
-  // 描画中の手のタッチ(指)を全体でブロックするためのフラグ
-  const blockPalmRef = useRef(false);
+  // DPR対応でキャンバスをリサイズ
+  const resizeCanvas = () => {
+    const canvas = canvasRef.current;
+    const wrapper = wrapperRef.current;
+    if (!canvas || !wrapper) return;
 
-  // 一度だけセットアップ
-  const setupContext = () => {
+    const rect = wrapper.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+
+    canvas.style.width = rect.width + "px";
+    canvas.style.height = height + "px";
+
+    canvas.width = Math.floor(rect.width * dpr);
+    canvas.height = Math.floor(height * dpr);
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+
+    redrawAll();
+  };
+
+  useEffect(() => {
+    resizeCanvas();
+    const ro = new ResizeObserver(resizeCanvas);
+    if (wrapperRef.current) ro.observe(wrapperRef.current);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [height, strokes]);
+
+  const getPoint = (e: PointerEvent): Point => {
+    const canvas = canvasRef.current!;
+    const rect = canvas.getBoundingClientRect();
+    // rect基準で座標を取る（offsetX/Yはズレの原因になりやすい）
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
+  };
+
+  const redrawAll = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    ctxRef.current = ctx;
-
-    const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-
-    // dprに追従
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // DPRスケール後なので clearRect はCSS座標でOK
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
+    ctx.lineWidth = 3;
 
-    // ★少し太く
-    ctx.lineWidth = 4.0;
-    ctx.strokeStyle = "#000";
+    const drawStroke = (s: Stroke) => {
+      if (s.length < 2) return;
+      ctx.beginPath();
+      ctx.moveTo(s[0].x, s[0].y);
+      for (let i = 1; i < s.length; i++) {
+        ctx.lineTo(s[i].x, s[i].y);
+      }
+      ctx.stroke();
+    };
+
+    strokes.forEach(drawStroke);
+    if (current) drawStroke(current);
   };
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    setupContext();
+    redrawAll();
+    onChangeStrokes?.(current ? [...strokes, current] : strokes);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strokes, current]);
 
-    const ctx = ctxRef.current;
-    if (!ctx) return;
+  const setScrollLock = (locked: boolean) => {
+    // pen描画中だけスクロール禁止
+    if (!wrapperRef.current) return;
+    wrapperRef.current.style.touchAction = locked ? "none" : "pan-y";
+  };
 
-    const getLocal = (e: PointerEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      return {
-        x: (e.clientX - rect.left) * dpr,
-        y: (e.clientY - rect.top) * dpr,
-        p: e.pressure || 0.5,
-      };
-    };
+  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    // 指はスクロール専用 → 描画しない
+    if (e.pointerType === "touch") return;
 
-    const beginStroke = (x: number, y: number, p: number) => {
-      isDrawingRef.current = true;
-      lastPointRef.current = { x, y, p };
-      ctx.beginPath();
-      ctx.moveTo(x, y);
+    // pen/mouseだけ描画対象
+    drawingPointerIdRef.current = e.pointerId;
+    setScrollLock(true);
 
-      // 描画中は選択させない
-      blockPalmRef.current = true;
-      document.body.style.userSelect = "none";
-      (document.body.style as any).webkitUserSelect = "none";
-      (document.body.style as any).webkitTouchCallout = "none";
-    };
+    const p = getPoint(e.nativeEvent);
+    setCurrent([p]);
 
-    const extendStroke = (x: number, y: number, p: number) => {
-      if (!isDrawingRef.current) return;
-      const last = lastPointRef.current;
-      if (!last) {
-        lastPointRef.current = { x, y, p };
-        return;
-      }
+    // ブラウザの既定動作（スクロール等）を止める
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
 
-      // ★pressureで太さ微調整（太め寄り）
-      const width = 3.6 + 3.2 * p;
-      ctx.lineWidth = width;
+  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (drawingPointerIdRef.current !== e.pointerId) return;
+    if (!current) return;
 
-      ctx.beginPath();
-      ctx.moveTo(last.x, last.y);
-      ctx.lineTo(x, y);
-      ctx.stroke();
+    const p = getPoint(e.nativeEvent);
+    setCurrent((prev) => (prev ? [...prev, p] : [p]));
+    e.preventDefault();
+  };
 
-      lastPointRef.current = { x, y, p };
-    };
+  const endStroke = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (drawingPointerIdRef.current !== e.pointerId) return;
+    drawingPointerIdRef.current = null;
+    setScrollLock(false);
 
-    const endStroke = () => {
-      isDrawingRef.current = false;
-      lastPointRef.current = null;
+    if (current && current.length > 0) {
+      setStrokes((prev) => [...prev, current]);
+    }
+    setCurrent(null);
 
-      blockPalmRef.current = false;
-      document.body.style.userSelect = "";
-      (document.body.style as any).webkitUserSelect = "";
-      (document.body.style as any).webkitTouchCallout = "";
-    };
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    e.preventDefault();
+  };
 
-    // ---- Pointer Events（iPad / PC共通・ペンのみ描画） -----------------
-    const handlePointerDown = (e: PointerEvent) => {
-      if (e.pointerType !== "pen" && e.pointerType !== "mouse") {
-        // 指タッチは無視（スクロール専用）
-        return;
-      }
-      if (e.pointerType === "mouse" && e.buttons !== 1) return;
-
-      e.preventDefault();
-      e.stopPropagation();
-
-      try {
-        canvas.setPointerCapture(e.pointerId);
-      } catch {}
-
-      const { x, y, p } = getLocal(e);
-      beginStroke(x, y, p);
-    };
-
-    const handlePointerMove = (e: PointerEvent) => {
-      if (!isDrawingRef.current) return;
-      if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
-
-      e.preventDefault();
-      e.stopPropagation();
-
-      const evs = e.getCoalescedEvents?.() || [e];
-      evs.forEach((ev) => {
-        const { x, y, p } = getLocal(ev as PointerEvent);
-        extendStroke(x, y, p);
-      });
-    };
-
-    const handlePointerUp = (e: PointerEvent) => {
-      if (!isDrawingRef.current) return;
-      if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
-
-      e.preventDefault();
-      e.stopPropagation();
-
-      try {
-        canvas.releasePointerCapture(e.pointerId);
-      } catch {}
-
-      endStroke();
-    };
-
-    // ---- palm rejection（描画中の指タップを全体でブロック） -------------
-    const blockPalm = (e: TouchEvent) => {
-      if (!blockPalmRef.current) return;
-
-      const touches = Array.from(e.touches.length ? e.touches : e.changedTouches);
-      const supportsTouchType = touches[0] && "touchType" in (touches[0] as any);
-
-      if (supportsTouchType) {
-        const hasStylus = touches.some(
-          (t) => (t as any).touchType === "stylus"
-        );
-        if (!hasStylus) {
-          e.preventDefault();
-          e.stopPropagation();
-        }
-      } else {
-        // touchTypeが無い環境は、描画中の指イベントは全部ブロック
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    };
-
-    canvas.addEventListener("pointerdown", handlePointerDown, { passive: false });
-    canvas.addEventListener("pointermove", handlePointerMove, { passive: false });
-    canvas.addEventListener("pointerup", handlePointerUp, { passive: false });
-    canvas.addEventListener("pointercancel", handlePointerUp, { passive: false });
-
-    document.addEventListener("touchstart", blockPalm, {
-      passive: false,
-      capture: true,
-    });
-    document.addEventListener("touchmove", blockPalm, {
-      passive: false,
-      capture: true,
-    });
-    document.addEventListener("touchend", blockPalm, {
-      passive: false,
-      capture: true,
-    });
-
-    return () => {
-      canvas.removeEventListener("pointerdown", handlePointerDown);
-      canvas.removeEventListener("pointermove", handlePointerMove);
-      canvas.removeEventListener("pointerup", handlePointerUp);
-      canvas.removeEventListener("pointercancel", handlePointerUp);
-
-      document.removeEventListener("touchstart", blockPalm, true as any);
-      document.removeEventListener("touchmove", blockPalm, true as any);
-      document.removeEventListener("touchend", blockPalm, true as any);
-    };
-  }, []);
-
-  const handleClear = () => {
-    const canvas = canvasRef.current;
-    const ctx = ctxRef.current;
-    if (!canvas || !ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const clear = () => {
+    setStrokes([]);
+    setCurrent(null);
   };
 
   return (
     <div
+      ref={wrapperRef}
       style={{
-        userSelect: "none",
-        WebkitUserSelect: "none",
-        // 指スクロールは許可（縦）
+        width: "100%",
+        height,
+        border: "1px solid #ccc",
+        borderRadius: 8,
+        background: "#fff",
+        // ふだんは指スクロール可
         touchAction: "pan-y",
+        position: "relative",
       }}
     >
       <canvas
         ref={canvasRef}
-        style={{
-          width: "100%",
-          height: `${height}px`,
-          display: "block",
-          userSelect: "none",
-          WebkitUserSelect: "none",
-          background: "#fff",
-          border: "1px solid #ccc",
-          borderRadius: 6,
-          // 指スクロールOK、描画時はpreventDefaultで止める
-          touchAction: "pan-y",
-        }}
+        style={{ display: "block", width: "100%", height }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endStroke}
+        onPointerCancel={endStroke}
       />
-      <div style={{ textAlign: "right", marginTop: 4 }}>
-        <button
-          type="button"
-          onClick={handleClear}
-          style={{ fontSize: "0.8rem" }}
-        >
-          クリア
-        </button>
-      </div>
+      <button
+        type="button"
+        onClick={clear}
+        style={{
+          position: "absolute",
+          right: 8,
+          bottom: 8,
+          fontSize: 12,
+          padding: "4px 8px",
+        }}
+      >
+        クリア
+      </button>
     </div>
   );
-};
-
-export default HandwritingCanvas;
+}
