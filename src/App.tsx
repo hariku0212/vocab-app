@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import HandwritingCanvas from './HandwritingCanvas';
 
 const GAS_ENDPOINT =
@@ -103,15 +103,10 @@ type WordsData = {
 };
 
 type LevelFilter = 'all' | '600' | '730' | '860' | '990';
-
 type Direction = 'en_to_jp' | 'jp_to_en';
-
 type Mode = 'index' | 'level';
-
 type InputMode = 'text' | 'handwriting';
-
 type ViewMode = 'test' | 'flash';
-
 type ShowExamplesMode = 'auto' | 'always' | 'never';
 
 type WrongItemStat = {
@@ -177,18 +172,12 @@ function shuffleArray<T>(arr: T[]): T[] {
   return a;
 }
 
-export default function App() {
-  // ---- auth ----
-  const [authReady, setAuthReady] = useState(false);
-  const [isPostLoginLoading, setIsPostLoginLoading] = useState(false);
+function App() {
   const [userId, setUserId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState<string | null>(null);
 
-  // ---- data ----
   const [wordsData, setWordsData] = useState<WordsData | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
 
-  // ---- session config ----
   const [sessionConfig, setSessionConfig] = useState<SessionConfig>({
     deckId: 'core',
     mode: 'index',
@@ -202,46 +191,43 @@ export default function App() {
 
   const [inputMode, setInputMode] = useState<InputMode>('text');
   const [viewMode, setViewMode] = useState<ViewMode>('test');
-  const [showConfigPanel, setShowConfigPanel] = useState(true);
 
-  // ---- session state ----
   const [sessionBookId, setSessionBookId] = useState<string | null>(null);
   const [sessionDeckId, setSessionDeckId] = useState<string | null>(null);
   const [sessionItems, setSessionItems] = useState<WordItem[]>([]);
   const [currentPage, setCurrentPage] = useState<number>(0);
   const [pageSize, setPageSize] = useState<number>(15);
 
-  // test answers
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [marks, setMarks] = useState<Record<number, 'correct' | 'wrong'>>({});
   const [showAnswers, setShowAnswers] = useState<boolean>(false);
   const [isSavingPage, setIsSavingPage] = useState<boolean>(false);
 
-  // flash cards
   const [cardIndex, setCardIndex] = useState<number>(0);
   const [showCardAnswer, setShowCardAnswer] = useState<boolean>(false);
 
-  // ranking / mypage
   const [ranking, setRanking] = useState<RankingEntry[] | null>(null);
   const [isLoadingRanking, setIsLoadingRanking] = useState<boolean>(false);
+
   const [userOverview, setUserOverview] = useState<UserOverview | null>(null);
   const [isLoadingOverview, setIsLoadingOverview] = useState<boolean>(false);
-  const [myPageWrongItems, setMyPageWrongItems] = useState<WrongItemStat[] | null>(null);
-  const [isLoadingMyPageWrong, setIsLoadingMyPageWrong] = useState<boolean>(false);
+  const [myPageWrongItems, setMyPageWrongItems] =
+    useState<WrongItemStat[] | null>(null);
+  const [isLoadingMyPageWrong, setIsLoadingMyPageWrong] =
+    useState<boolean>(false);
+
   const [displayNameEdit, setDisplayNameEdit] = useState<string>('');
+  const [message, setMessage] = useState<string | null>(null);
 
-  // speech
-  const [englishVoice, setEnglishVoice] = useState<SpeechSynthesisVoice | null>(null);
+  const [englishVoice, setEnglishVoice] =
+    useState<SpeechSynthesisVoice | null>(null);
 
-  // google button
-  const googleBtnRef = useRef<HTMLDivElement | null>(null);
+  // ★ ログイン復元のためのガード（ログイン画面チラ見え防止）
+  const [authReady, setAuthReady] = useState(false);
 
-  // prefetch guard
-  const didPrefetchRef = useRef(false);
-
-  // -------------------------
-  // Restore auth from localStorage (avoid iPhone re-login / flicker)
-  // -------------------------
+  /***************
+   * ログイン状態の復元
+   ***************/
   useEffect(() => {
     try {
       const saved = localStorage.getItem('auth');
@@ -250,13 +236,103 @@ export default function App() {
         if (parsed?.userId) setUserId(parsed.userId);
         if (parsed?.displayName) setDisplayName(parsed.displayName);
       }
-    } catch {}
-    setAuthReady(true);
+    } catch {
+      // 失敗しても無視
+    } finally {
+      setAuthReady(true);
+    }
   }, []);
 
-  // -------------------------
-  // Load word json (BASE_URL)
-  // -------------------------
+  /***************
+   * Google ログイン
+   ***************/
+  async function handleGoogleCredentialResponse(response: any) {
+    try {
+      const idToken = response.credential as string | undefined;
+      if (!idToken) {
+        setMessage('Google からの ID トークンが取得できませんでした');
+        return;
+      }
+
+      const payload = decodeJwt(idToken);
+      const sub = String(payload.sub);
+      const email = (payload.email as string) || '';
+      const name = (payload.name as string) || '';
+
+      const localUserId = 'g_' + sub;
+      const localDisplay = name || email || localUserId;
+
+      setUserId(localUserId);
+      setDisplayName(localDisplay);
+
+      // ★ iPhoneでログインが落ちるのを防ぐため保存
+      try {
+        localStorage.setItem(
+          'auth',
+          JSON.stringify({ userId: localUserId, displayName: localDisplay })
+        );
+      } catch {}
+
+      const body = {
+        action: 'upsertUser',
+        userId: localUserId,
+        googleSub: sub,
+        email,
+        displayName: localDisplay,
+      };
+
+      try {
+        await fetch(GAS_ENDPOINT, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: {
+            'Content-Type': 'text/plain;charset=utf-8',
+          },
+          body: JSON.stringify(body),
+        });
+        // メッセージは残す（UI上の枠は元からある）
+        setMessage('Google ログインしました: ' + localDisplay);
+      } catch (e) {
+        console.error(e);
+        setMessage('Google ログイン情報の送信に失敗しました');
+      }
+    } catch (e) {
+      console.error(e);
+      setMessage('Google ログイン時にエラーが発生しました');
+    }
+  }
+
+  useEffect(() => {
+    if (!GOOGLE_CLIENT_ID) return;
+
+    const tryInit = () => {
+      if (!window.google || !window.google.accounts?.id) {
+        setTimeout(tryInit, 500);
+        return;
+      }
+
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleGoogleCredentialResponse,
+      });
+
+      const buttonDiv = document.getElementById('googleSignInDiv');
+      if (buttonDiv) {
+        window.google.accounts.id.renderButton(buttonDiv, {
+          type: 'standard',
+          theme: 'outline',
+          size: 'large',
+          text: 'signin_with',
+        });
+      }
+    };
+
+    tryInit();
+  }, []);
+
+  /***************
+   * 単語データ読み込み（BASE_URL 対応）
+   ***************/
   useEffect(() => {
     const load = async () => {
       try {
@@ -265,24 +341,17 @@ export default function App() {
         if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
         const data: WordsData = await res.json();
         setWordsData(data);
-
-        // deckId が存在しない場合は先頭に合わせる
-        const deckKeys = Object.keys(data.decks);
-        if (deckKeys.length && !data.decks[sessionConfig.deckId]) {
-          setSessionConfig((prev) => ({ ...prev, deckId: deckKeys[0] }));
-        }
       } catch (e) {
         console.error(e);
         setMessage('単語データの読み込みに失敗しました');
       }
     };
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // -------------------------
-  // Pick English voice (best-effort for iOS too)
-  // -------------------------
+  /***************
+   * 音声読み上げ用の英語 voice 選択
+   ***************/
   useEffect(() => {
     if (typeof window === 'undefined' || !window.speechSynthesis) return;
     const synth = window.speechSynthesis;
@@ -290,33 +359,44 @@ export default function App() {
     const pickVoice = () => {
       const voices = synth.getVoices();
       if (!voices || voices.length === 0) return;
-      const en = voices.filter((v) => (v.lang || '').toLowerCase().startsWith('en'));
+
+      const langLower = (v: SpeechSynthesisVoice) =>
+        (v.lang || '').toLowerCase();
+      const enVoices = voices.filter((v) => langLower(v).startsWith('en'));
+
       const preferredNames = ['Samantha', 'Karen', 'Daniel', 'Alex', 'Fred'];
       let chosen: SpeechSynthesisVoice | null = null;
+
       for (const name of preferredNames) {
-        const found = en.find((v) => v.name.includes(name));
-        if (found) { chosen = found; break; }
+        const found = enVoices.find((v) => v.name.includes(name));
+        if (found) {
+          chosen = found;
+          break;
+        }
       }
-      if (!chosen) chosen = en[0] || voices[0];
+
+      if (!chosen) chosen = enVoices[0] || voices[0];
       setEnglishVoice(chosen);
     };
 
     pickVoice();
     synth.addEventListener('voiceschanged', pickVoice);
-    return () => synth.removeEventListener('voiceschanged', pickVoice);
+    return () => {
+      synth.removeEventListener('voiceschanged', pickVoice);
+    };
   }, []);
 
+  // 英語読み上げ（iOS対策で resume を噛ませる）
   const speakEnglish = (text: string) => {
-    if (!text) return;
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
     const synth = window.speechSynthesis;
-    if (!synth) {
-      alert('このブラウザは音声読み上げに対応していません');
-      return;
-    }
+    if (!synth || !text) return;
 
-    // iOS対策：resume してから speak
-    try { synth.cancel(); } catch {}
-    try { synth.resume(); } catch {}
+    try {
+      synth.cancel();
+      // iOS Safari で止まってる時の保険
+      synth.resume();
+    } catch {}
 
     const utter = new SpeechSynthesisUtterance(text);
     if (englishVoice) {
@@ -330,105 +410,18 @@ export default function App() {
     synth.speak(utter);
   };
 
-  // -------------------------
-  // Google login handler
-  // -------------------------
-  async function handleGoogleCredentialResponse(response: any) {
-    setIsPostLoginLoading(true);
-    setMessage(null);
-    try {
-      const idToken = response.credential as string | undefined;
-      if (!idToken) throw new Error('no id token');
-
-      const payload = decodeJwt(idToken);
-      const sub = String(payload.sub);
-      const email = (payload.email as string) || '';
-      const name = (payload.name as string) || '';
-
-      const localUserId = 'g_' + sub;
-      const localDisplay = name || email || localUserId;
-
-      setUserId(localUserId);
-      setDisplayName(localDisplay);
-      localStorage.setItem('auth', JSON.stringify({ userId: localUserId, displayName: localDisplay }));
-
-      const body = {
-        action: 'upsertUser',
-        userId: localUserId,
-        googleSub: sub,
-        email,
-        displayName: localDisplay,
-      };
-
-      // upsert は no-cors で fire-and-forget
-      fetch(GAS_ENDPOINT, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify(body),
-      }).catch((e) => console.error(e));
-
-      // すぐにスプレッドシート情報も取りに行く（ぐるぐる中）
-      if (wordsData && !didPrefetchRef.current) {
-        await prefetchUserData(localUserId, wordsData.bookId, sessionConfig.deckId);
-        didPrefetchRef.current = true;
-      }
-    } catch (e) {
-      console.error(e);
-      setMessage('Google ログインに失敗しました');
-      setUserId(null);
-      setDisplayName(null);
-      localStorage.removeItem('auth');
-    } finally {
-      setIsPostLoginLoading(false);
-    }
-  }
-
-  // -------------------------
-  // Init Google button (render once)
-  // -------------------------
-  useEffect(() => {
-    if (!authReady || userId) return;
-    if (!GOOGLE_CLIENT_ID) return;
-
-    const tryInit = () => {
-      if (!window.google || !window.google.accounts?.id) {
-        setTimeout(tryInit, 400);
-        return;
-      }
-
-      window.google.accounts.id.initialize({
-        client_id: GOOGLE_CLIENT_ID,
-        callback: handleGoogleCredentialResponse,
-      });
-
-      if (googleBtnRef.current) {
-        window.google.accounts.id.renderButton(googleBtnRef.current, {
-          theme: 'outline',
-          size: 'large',
-          type: 'standard',
-          text: 'signin_with',
-          shape: 'pill',
-        });
-      }
-
-      // iOSでOne Tapが出ない時の保険
-      try { window.google.accounts.id.prompt(); } catch {}
-    };
-
-    tryInit();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authReady, userId]);
-
-  // -------------------------
-  // Debug login
-  // -------------------------
-  const handleDebugLogin = async () => {
+  /***************
+   * デバッグログイン
+   ***************/
+  const handleDebugLogin = () => {
     const id = 'debug_user';
-    setIsPostLoginLoading(true);
     setUserId(id);
     setDisplayName(id);
-    localStorage.setItem('auth', JSON.stringify({ userId: id, displayName: id }));
+    setMessage('デバッグ用ユーザーとしてログインしました');
+
+    try {
+      localStorage.setItem('auth', JSON.stringify({ userId: id, displayName: id }));
+    } catch {}
 
     const body = {
       action: 'upsertUser',
@@ -443,64 +436,11 @@ export default function App() {
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(body),
     }).catch((e) => console.error(e));
-
-    if (wordsData && !didPrefetchRef.current) {
-      await prefetchUserData(id, wordsData.bookId, sessionConfig.deckId);
-      didPrefetchRef.current = true;
-    }
-    setIsPostLoginLoading(false);
   };
 
-  // -------------------------
-  // Prefetch mypage info on (userId + words) ready
-  // -------------------------
-  const prefetchUserData = async (uid: string, bookId: string, deckId: string) => {
-    setIsLoadingOverview(true);
-    setIsLoadingMyPageWrong(true);
-    try {
-      const [overviewRes, wrongRes] = await Promise.all([
-        jsonp<UserOverviewResponse>({ action: 'getUserOverview', userId: uid }),
-        jsonp<WrongItemsResponse>({ action: 'getWrongItems', userId: uid, bookId, deck: deckId }),
-      ]);
-
-      if (overviewRes.ok && overviewRes.user) {
-        setUserOverview(overviewRes.user);
-        setDisplayNameEdit(overviewRes.user.display_name);
-      } else {
-        setUserOverview(null);
-      }
-
-      if (wrongRes.ok && wrongRes.items) {
-        const items = [...wrongRes.items].filter((i) => i.wrong_total > 0);
-        items.sort((a, b) => {
-          if (b.wrong_total !== a.wrong_total) return b.wrong_total - a.wrong_total;
-          const ad = a.last_wrong_at ? Date.parse(a.last_wrong_at) : 0;
-          const bd = b.last_wrong_at ? Date.parse(b.last_wrong_at) : 0;
-          return bd - ad;
-        });
-        setMyPageWrongItems(items.slice(0, 10));
-      } else {
-        setMyPageWrongItems(null);
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsLoadingOverview(false);
-      setIsLoadingMyPageWrong(false);
-    }
-  };
-
-  useEffect(() => {
-    if (!userId || !wordsData || didPrefetchRef.current) return;
-    prefetchUserData(userId, wordsData.bookId, sessionConfig.deckId).then(() => {
-      didPrefetchRef.current = true;
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, wordsData]);
-
-  // -------------------------
-  // Start normal session
-  // -------------------------
+  /***************
+   * 通常セッション開始（番号／レベル）
+   ***************/
   const handleStartSession = () => {
     if (!wordsData) {
       setMessage('単語データがまだ読み込まれていません');
@@ -509,7 +449,7 @@ export default function App() {
 
     const deck = wordsData.decks[sessionConfig.deckId];
     if (!deck) {
-      setMessage('選択されたセットが見つかりません: ' + sessionConfig.deckId);
+      setMessage('選択されたデッキが見つかりません: ' + sessionConfig.deckId);
       return;
     }
 
@@ -518,16 +458,28 @@ export default function App() {
     if (sessionConfig.mode === 'index') {
       const start = Math.max(1, sessionConfig.startIndex);
       const end = Math.max(start, sessionConfig.endIndex);
+      const expectedCount = end - start + 1;
 
       filtered = deck.items.filter((item) => {
         const idx = item.bookIndex ?? 0;
         return idx >= start && idx <= end;
       });
+
+      setMessage(
+        `番号指定モード: ${deck.labelJa} / 範囲 ${start}〜${end} / 想定問題数: ${expectedCount}（実際: ${filtered.length} 問）`
+      );
     } else {
       filtered = deck.items.filter((item) => {
         if (sessionConfig.level === 'all') return true;
         return item.level === sessionConfig.level;
       });
+
+      const levelLabel =
+        sessionConfig.level === 'all' ? '全レベル' : `レベル ${sessionConfig.level}`;
+
+      setMessage(
+        `レベル別モード: ${deck.labelJa} / ${levelLabel} / 問題数: ${filtered.length}`
+      );
     }
 
     if (sessionConfig.shuffle) {
@@ -543,19 +495,18 @@ export default function App() {
     setShowAnswers(false);
     setCardIndex(0);
     setShowCardAnswer(false);
-    setShowConfigPanel(false);
   };
 
-  // -------------------------
-  // Start wrong session
-  // -------------------------
+  /***************
+   * 苦手単語モード開始
+   ***************/
   const handleStartWrongSession = async () => {
     if (!userId) {
-      alert('苦手単語モードにはログインが必要です');
+      setMessage('苦手単語モードにはログインが必要です');
       return;
     }
     if (!wordsData) {
-      alert('単語データがまだ読み込まれていません');
+      setMessage('単語データがまだ読み込まれていません');
       return;
     }
 
@@ -571,13 +522,13 @@ export default function App() {
       });
 
       if (!res.ok || !res.items) {
-        alert('苦手単語リストの取得に失敗しました');
+        setMessage('苦手単語リストの取得に失敗しました');
         return;
       }
 
       const deck = wordsData.decks[deckId];
       if (!deck) {
-        alert('セットが見つかりません: ' + deckId);
+        setMessage('デッキが見つかりません: ' + deckId);
         return;
       }
 
@@ -591,7 +542,7 @@ export default function App() {
       });
 
       if (wordList.length === 0) {
-        alert('不正解がある単語がまだありません');
+        setMessage('不正解がある単語がまだありません');
         setSessionItems([]);
         return;
       }
@@ -609,17 +560,19 @@ export default function App() {
       setShowAnswers(false);
       setCardIndex(0);
       setShowCardAnswer(false);
-      setShowConfigPanel(false);
+
+      setMessage(`苦手単語モード開始: ${wordList.length} 問`);
     } catch (e) {
       console.error(e);
-      alert('苦手単語モード取得時にエラーが発生しました');
+      setMessage('苦手単語モード取得時にエラーが発生しました');
     }
   };
 
-  // -------------------------
-  // Paging
-  // -------------------------
-  const totalPages = sessionItems.length > 0 ? Math.ceil(sessionItems.length / pageSize) : 0;
+  /***************
+   * ページング関連
+   ***************/
+  const totalPages =
+    sessionItems.length > 0 ? Math.ceil(sessionItems.length / pageSize) : 0;
   const startIndex = currentPage * pageSize;
   const endIndex = Math.min(startIndex + pageSize, sessionItems.length);
   const pageItems = sessionItems.slice(startIndex, endIndex);
@@ -628,40 +581,41 @@ export default function App() {
   const shouldShowExampleInQuestion = (word: WordItem): boolean => {
     if (sessionConfig.showExamples === 'never') return false;
     if (sessionConfig.showExamples === 'always') return true;
-    return !!word.poly; // auto: 多義語のみ
+    // auto: 多義語のみ
+    return !!word.poly;
   };
 
-  // -------------------------
-  // Show answers for current page
-  // -------------------------
+  /***************
+   * 解答表示（デフォルトで○）
+   ***************/
   const handleShowAnswersForPage = () => {
     setShowAnswers(true);
     setMarks((prev) => {
       const updated: Record<number, 'correct' | 'wrong'> = { ...prev };
       pageItems.forEach((_, idx) => {
         const absIndex = startIndex + idx;
-        if (updated[absIndex] === undefined) updated[absIndex] = 'correct';
+        if (updated[absIndex] === undefined) {
+          updated[absIndex] = 'correct';
+        }
       });
       return updated;
     });
-    // 採点開始したら自動でトップへ戻る
-    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // -------------------------
-  // Save current page results
-  // -------------------------
+  /***************
+   * ページ保存
+   ***************/
   const handleSaveCurrentPage = async () => {
     if (!sessionBookId || !sessionDeckId) {
-      alert('セッションが開始されていません');
+      setMessage('セッションが開始されていません');
       return;
     }
     if (!userId) {
-      alert('先にログインしてください');
+      setMessage('先にログインしてください');
       return;
     }
     if (pageItems.length === 0) {
-      alert('このページには問題がありません');
+      setMessage('このページには問題がありません');
       return;
     }
 
@@ -697,424 +651,463 @@ export default function App() {
       await fetch(GAS_ENDPOINT, {
         method: 'POST',
         mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        headers: {
+          'Content-Type': 'text/plain;charset=utf-8',
+        },
         body: JSON.stringify(payload),
       });
 
-      alert('このページの成績を保存しました');
+      setMessage(
+        `${displayName ?? userId} さんのこのページの成績を保存リクエストしました`
+      );
 
       if (currentPage + 1 < totalPages) {
         setCurrentPage((prev) => prev + 1);
         setShowAnswers(false);
-        window.scrollTo({ top: 0, behavior: 'smooth' });
       } else {
-        alert('セッションが終了しました');
-      }
-
-      // 週次正解数などが増えるので、マイページも更新しておく
-      if (wordsData) {
-        didPrefetchRef.current = false;
-        prefetchUserData(userId, wordsData.bookId, sessionDeckId);
+        setMessage(
+          `${displayName ?? userId} さんのセッションが終了しました（全ページ保存済み）`
+        );
       }
     } catch (e) {
       console.error(e);
-      alert('成績保存リクエストの送信に失敗しました');
+      setMessage('成績保存リクエストの送信に失敗しました');
     } finally {
       setIsSavingPage(false);
     }
   };
 
-  // -------------------------
-  // Ranking
-  // -------------------------
+  /***************
+   * ランキング取得
+   ***************/
   const handleFetchRanking = async () => {
     setIsLoadingRanking(true);
     try {
-      const res = await jsonp<RankingResponse>({ action: 'getRanking' });
+      const res = await jsonp<RankingResponse>({
+        action: 'getRanking',
+      });
+
       if (!res.ok || !res.ranking) {
+        setMessage('ランキングの取得に失敗しました');
         setRanking(null);
-        alert('ランキングの取得に失敗しました');
         return;
       }
+
       setRanking(res.ranking);
     } catch (e) {
       console.error(e);
-      alert('ランキング取得時にエラーが発生しました');
+      setMessage('ランキング取得時にエラーが発生しました');
     } finally {
       setIsLoadingRanking(false);
     }
   };
 
-  // -------------------------
-  // MyPage (manual refresh)
-  // -------------------------
+  /***************
+   * マイページ取得
+   ***************/
   const handleFetchMyPage = async () => {
-    if (!userId || !wordsData) return;
-    await prefetchUserData(userId, wordsData.bookId, sessionConfig.deckId);
+    if (!userId) {
+      setMessage('マイページを表示するにはログインが必要です');
+      return;
+    }
+    if (!wordsData) {
+      setMessage('単語データがまだ読み込まれていません');
+      return;
+    }
+
+    setIsLoadingOverview(true);
+    setIsLoadingMyPageWrong(true);
+
+    try {
+      const overviewRes = await jsonp<UserOverviewResponse>({
+        action: 'getUserOverview',
+        userId,
+      });
+
+      if (overviewRes.ok && overviewRes.user) {
+        setUserOverview(overviewRes.user);
+        setDisplayNameEdit(overviewRes.user.display_name);
+      } else {
+        setUserOverview(null);
+        if (overviewRes.error) {
+          setMessage('マイページ情報取得エラー: ' + overviewRes.error);
+        }
+      }
+
+      const wrongRes = await jsonp<WrongItemsResponse>({
+        action: 'getWrongItems',
+        userId,
+        bookId: wordsData.bookId,
+        deck: sessionConfig.deckId,
+      });
+
+      if (wrongRes.ok && wrongRes.items) {
+        const items = [...wrongRes.items].filter((i) => i.wrong_total > 0);
+        items.sort((a, b) => {
+          if (b.wrong_total !== a.wrong_total) {
+            return b.wrong_total - a.wrong_total;
+          }
+          const ad = a.last_wrong_at ? Date.parse(a.last_wrong_at) : 0;
+          const bd = b.last_wrong_at ? Date.parse(b.last_wrong_at) : 0;
+          return bd - ad;
+        });
+        setMyPageWrongItems(items.slice(0, 10));
+      } else {
+        setMyPageWrongItems(null);
+      }
+    } catch (e) {
+      console.error(e);
+      setMessage('マイページ情報の取得でエラーが発生しました');
+    } finally {
+      setIsLoadingOverview(false);
+      setIsLoadingMyPageWrong(false);
+    }
   };
 
-  // -------------------------
-  // Update display name
-  // -------------------------
+  /***************
+   * 表示名の更新
+   ***************/
   const handleUpdateDisplayName = async () => {
     if (!userId) {
-      alert('ログインしていません');
+      setMessage('ログインしていません');
       return;
     }
     const newName = displayNameEdit.trim();
     if (!newName) {
-      alert('表示名を入力してください');
+      setMessage('表示名を入力してください');
       return;
     }
 
     try {
-      const payload = { action: 'updateDisplayName', userId, displayName: newName };
+      const payload = {
+        action: 'updateDisplayName',
+        userId,
+        displayName: newName,
+      };
+
       await fetch(GAS_ENDPOINT, {
         method: 'POST',
         mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        headers: {
+          'Content-Type': 'text/plain;charset=utf-8',
+        },
         body: JSON.stringify(payload),
       });
 
       setDisplayName(newName);
       setUserOverview((prev) => (prev ? { ...prev, display_name: newName } : prev));
-      localStorage.setItem('auth', JSON.stringify({ userId, displayName: newName }));
 
-      alert('表示名を保存しました');
+      // ★ auth保存も更新
+      try {
+        const saved = localStorage.getItem('auth');
+        const parsed = saved ? JSON.parse(saved) : {};
+        localStorage.setItem(
+          'auth',
+          JSON.stringify({ ...parsed, userId, displayName: newName })
+        );
+      } catch {}
+
+      setMessage('表示名を更新しました');
     } catch (e) {
       console.error(e);
-      alert('表示名の更新に失敗しました');
+      setMessage('表示名の更新に失敗しました');
     }
   };
 
-  // reset flash card when items change
+  /***************
+   * 単語カード用
+   ***************/
   useEffect(() => {
     setCardIndex(0);
     setShowCardAnswer(false);
   }, [viewMode, sessionItems]);
 
+  // ★ アプリ名クリックでトップへ（UIはそのまま）
   const goTop = () => {
     setSessionItems([]);
     setCurrentPage(0);
     setShowAnswers(false);
     setAnswers({});
     setMarks({});
-    setShowConfigPanel(true);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // -------------------------
-  // UI
-  // -------------------------
+  /***************
+   * レンダリング（UIは元のまま）
+   ***************/
   return (
     <div
       style={{
-        width: '100%',
-        maxWidth: 1024,
+        maxWidth: 900,
         margin: '0 auto',
-        padding: '1rem 1.25rem',
+        padding: '1.5rem',
         fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, sans-serif',
-        lineHeight: 1.55,
       }}
     >
-      <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <h1
-          style={{ margin: 0, cursor: 'pointer', fontSize: '1.6rem' }}
-          onClick={goTop}
-          title="トップへ戻る"
-        >
-          単語テスト
-        </h1>
-        {userId && (
-          <div style={{ fontSize: '0.95rem', color: '#444' }}>
-            {displayName ?? userId}
-          </div>
-        )}
-      </header>
-
-      {/* メッセージ（エラー時のみ軽く出す） */}
-      {message && (
-        <div
-          style={{
-            margin: '0.75rem 0',
-            padding: '0.5rem 0.75rem',
-            borderRadius: 8,
-            background: '#fff3cd',
-            color: '#664d03',
-            fontSize: '0.95rem',
-          }}
-        >
-          {message}
-        </div>
-      )}
+      <h1 style={{ cursor: 'pointer' }} onClick={goTop}>
+        金のフレーズ テスト（React プロトタイプ）
+      </h1>
 
       {/* ログイン */}
-      <section
-        style={{
-          marginTop: '1rem',
-          marginBottom: '1rem',
-          padding: '0.9rem',
-          border: '1px solid #e6e6e6',
-          borderRadius: 10,
-          background: '#fafafa',
-        }}
-      >
-        <h2 style={{ fontSize: '1.1rem', marginTop: 0 }}>ログイン</h2>
+      <section style={{ marginBottom: '1rem' }}>
+        <h2 style={{ fontSize: '1.1rem' }}>ログイン</h2>
 
         {!authReady ? (
-          <div>ログイン状態を確認中…</div>
-        ) : isPostLoginLoading ? (
-          <div>ログイン処理中…</div>
+          <div style={{ marginBottom: '0.5rem' }}>ログイン状態を確認中…</div>
         ) : userId ? (
-          <div>ログイン中です ✅</div>
+          <div style={{ marginBottom: '0.5rem' }}>
+            ログイン中: <strong>{displayName ?? userId}</strong>
+          </div>
         ) : (
-          <div>
-            <div ref={googleBtnRef} style={{ marginBottom: '0.5rem' }} />
-            <button onClick={handleDebugLogin} style={{ fontSize: '0.9rem' }}>
+          <div style={{ marginBottom: '0.5rem' }}>
+            <div id="googleSignInDiv" style={{ marginBottom: '0.5rem' }} />
+            <button onClick={handleDebugLogin}>
               （うまくいかないとき用）デバッグログイン
             </button>
           </div>
         )}
       </section>
 
-      {!wordsData && <div style={{ marginTop: '1rem' }}>単語データを読み込み中…</div>}
-
-      {/* 出題設定 */}
-      {wordsData && showConfigPanel && (
-        <section
+      {/* メッセージ */}
+      {message && (
+        <div
           style={{
-            marginTop: '1rem',
-            marginBottom: '1.25rem',
-            padding: '1rem',
-            border: '1px solid #eee',
-            borderRadius: 12,
-            background: '#fff',
+            marginBottom: '1rem',
+            padding: '0.5rem 0.75rem',
+            borderRadius: 4,
+            background: '#f5f5f5',
+            color: '#333',
           }}
         >
-          <h2 style={{ fontSize: '1.1rem', marginTop: 0 }}>出題設定</h2>
-
-          {/* モード切り替え */}
-          <div style={{ marginBottom: '0.5rem' }}>
-            <label style={{ marginRight: '1rem' }}>
-              <input
-                type="radio"
-                value="index"
-                checked={sessionConfig.mode === 'index'}
-                onChange={() =>
-                  setSessionConfig((prev) => ({ ...prev, mode: 'index' }))
-                }
-              />{' '}
-              番号指定
-            </label>
-            <label>
-              <input
-                type="radio"
-                value="level"
-                checked={sessionConfig.mode === 'level'}
-                onChange={() =>
-                  setSessionConfig((prev) => ({ ...prev, mode: 'level' }))
-                }
-              />{' '}
-              レベル別
-            </label>
-          </div>
-
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-              gap: '0.75rem',
-              alignItems: 'center',
-            }}
-          >
-            <label>
-              セット：
-              <select
-                value={sessionConfig.deckId}
-                onChange={(e) =>
-                  setSessionConfig((prev) => ({
-                    ...prev,
-                    deckId: e.target.value,
-                  }))
-                }
-                style={{ marginLeft: '0.4rem' }}
-              >
-                {Object.values(wordsData.decks).map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.labelJa || d.id}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            {sessionConfig.mode === 'index' && (
-              <>
-                <label>
-                  範囲 from:
-                  <input
-                    type="number"
-                    min={1}
-                    value={sessionConfig.startIndex}
-                    onChange={(e) =>
-                      setSessionConfig((prev) => ({
-                        ...prev,
-                        startIndex: Number(e.target.value || 1),
-                      }))
-                    }
-                    style={{ width: '6rem', marginLeft: '0.4rem' }}
-                  />
-                </label>
-                <label>
-                  to:
-                  <input
-                    type="number"
-                    min={1}
-                    value={sessionConfig.endIndex}
-                    onChange={(e) =>
-                      setSessionConfig((prev) => ({
-                        ...prev,
-                        endIndex: Number(e.target.value || prev.startIndex || 1),
-                      }))
-                    }
-                    style={{ width: '6rem', marginLeft: '0.4rem' }}
-                  />
-                </label>
-              </>
-            )}
-
-            {sessionConfig.mode === 'level' && (
-              <label>
-                レベル：
-                <select
-                  value={sessionConfig.level}
-                  onChange={(e) =>
-                    setSessionConfig((prev) => ({
-                      ...prev,
-                      level: e.target.value as LevelFilter,
-                    }))
-                  }
-                  style={{ marginLeft: '0.4rem' }}
-                >
-                  <option value="all">全レベル</option>
-                  <option value="600">600</option>
-                  <option value="730">730</option>
-                  <option value="860">860</option>
-                  <option value="990">990</option>
-                </select>
-              </label>
-            )}
-
-            <label>
-              出題方向：
-              <select
-                value={sessionConfig.direction}
-                onChange={(e) =>
-                  setSessionConfig((prev) => ({
-                    ...prev,
-                    direction: e.target.value as Direction,
-                  }))
-                }
-                style={{ marginLeft: '0.4rem' }}
-              >
-                <option value="en_to_jp">英語 → 日本語</option>
-                <option value="jp_to_en">日本語 → 英語</option>
-              </select>
-            </label>
-
-            <label>
-              1ページの問題数：
-              <select
-                value={pageSize}
-                onChange={(e) => setPageSize(Number(e.target.value))}
-                style={{ marginLeft: '0.4rem' }}
-              >
-                <option value={1}>1</option>
-                <option value={5}>5</option>
-                <option value={15}>15</option>
-                <option value={30}>30</option>
-                <option value={50}>50</option>
-              </select>
-            </label>
-
-            <label>
-              入力方法：
-              <select
-                value={inputMode}
-                onChange={(e) => setInputMode(e.target.value as InputMode)}
-                style={{ marginLeft: '0.4rem' }}
-              >
-                <option value="text">キーボード入力</option>
-                <option value="handwriting">手書き入力</option>
-              </select>
-            </label>
-
-            <label>
-              表示モード：
-              <select
-                value={viewMode}
-                onChange={(e) => setViewMode(e.target.value as ViewMode)}
-                style={{ marginLeft: '0.4rem' }}
-              >
-                <option value="test">テスト</option>
-                <option value="flash">単語カード</option>
-              </select>
-            </label>
-
-            <label>
-              出題順：
-              <select
-                value={sessionConfig.shuffle ? 'random' : 'sequential'}
-                onChange={(e) =>
-                  setSessionConfig((prev) => ({
-                    ...prev,
-                    shuffle: e.target.value === 'random',
-                  }))
-                }
-                style={{ marginLeft: '0.4rem' }}
-              >
-                <option value="sequential">昇順</option>
-                <option value="random">ランダム</option>
-              </select>
-            </label>
-
-            <label>
-              例文の表示：
-              <select
-                value={sessionConfig.showExamples}
-                onChange={(e) =>
-                  setSessionConfig((prev) => ({
-                    ...prev,
-                    showExamples: e.target.value as ShowExamplesMode,
-                  }))
-                }
-                style={{ marginLeft: '0.4rem' }}
-              >
-                <option value="auto">多義語のみ</option>
-                <option value="always">常に表示</option>
-                <option value="never">表示しない</option>
-              </select>
-            </label>
-          </div>
-
-          <div style={{ marginTop: '0.9rem', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-            <button onClick={handleStartSession}>テスト開始</button>
-            <button onClick={handleStartWrongSession}>間違えた単語だけ復習</button>
-          </div>
-        </section>
-      )}
-
-      {/* 設定再表示ボタン */}
-      {wordsData && !showConfigPanel && (
-        <div style={{ marginBottom: '0.75rem' }}>
-          <button onClick={() => setShowConfigPanel(true)} style={{ fontSize: '0.9rem' }}>
-            出題設定を表示
-          </button>
+          {message}
         </div>
       )}
 
+      {/* 出題設定 */}
+      <section
+        style={{
+          marginBottom: '1.5rem',
+          padding: '1rem',
+          border: '1px solid #ddd',
+          borderRadius: 6,
+        }}
+      >
+        <h2 style={{ fontSize: '1.1rem', marginTop: 0 }}>出題設定</h2>
+
+        {/* モード切り替え */}
+        <div style={{ marginBottom: '0.5rem' }}>
+          <label style={{ marginRight: '1rem' }}>
+            <input
+              type="radio"
+              value="index"
+              checked={sessionConfig.mode === 'index'}
+              onChange={() =>
+                setSessionConfig((prev) => ({ ...prev, mode: 'index' }))
+              }
+            />{' '}
+            番号指定（bookIndex）
+          </label>
+          <label>
+            <input
+              type="radio"
+              value="level"
+              checked={sessionConfig.mode === 'level'}
+              onChange={() =>
+                setSessionConfig((prev) => ({ ...prev, mode: 'level' }))
+              }
+            />{' '}
+            レベル別（600 / 730 / 860 / 990）
+          </label>
+        </div>
+
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '0.75rem',
+            alignItems: 'center',
+          }}
+        >
+          <label>
+            デッキ：
+            <select
+              value={sessionConfig.deckId}
+              onChange={(e) =>
+                setSessionConfig((prev) => ({
+                  ...prev,
+                  deckId: e.target.value,
+                }))
+              }
+            >
+              <option value="core">本体（金のフレーズ）</option>
+            </select>
+          </label>
+
+          {sessionConfig.mode === 'index' && (
+            <>
+              <label>
+                範囲 from:
+                <input
+                  type="number"
+                  min={1}
+                  value={sessionConfig.startIndex}
+                  onChange={(e) =>
+                    setSessionConfig((prev) => ({
+                      ...prev,
+                      startIndex: Number(e.target.value || 1),
+                    }))
+                  }
+                  style={{ width: '5rem', marginLeft: '0.25rem' }}
+                />
+              </label>
+              <label>
+                to:
+                <input
+                  type="number"
+                  min={1}
+                  value={sessionConfig.endIndex}
+                  onChange={(e) =>
+                    setSessionConfig((prev) => ({
+                      ...prev,
+                      endIndex: Number(e.target.value || prev.startIndex || 1),
+                    }))
+                  }
+                  style={{ width: '5rem', marginLeft: '0.25rem' }}
+                />
+              </label>
+            </>
+          )}
+
+          {sessionConfig.mode === 'level' && (
+            <label>
+              レベル：
+              <select
+                value={sessionConfig.level}
+                onChange={(e) =>
+                  setSessionConfig((prev) => ({
+                    ...prev,
+                    level: e.target.value as LevelFilter,
+                  }))
+                }
+              >
+                <option value="all">全レベル</option>
+                <option value="600">600</option>
+                <option value="730">730</option>
+                <option value="860">860</option>
+                <option value="990">990</option>
+              </select>
+            </label>
+          )}
+
+          <label>
+            出題方向：
+            <select
+              value={sessionConfig.direction}
+              onChange={(e) =>
+                setSessionConfig((prev) => ({
+                  ...prev,
+                  direction: e.target.value as Direction,
+                }))
+              }
+            >
+              <option value="en_to_jp">英語 → 日本語</option>
+              <option value="jp_to_en">日本語 → 英語</option>
+            </select>
+          </label>
+
+          <label>
+            1ページの問題数：
+            <select
+              value={pageSize}
+              onChange={(e) => setPageSize(Number(e.target.value))}
+            >
+              <option value={1}>1</option>
+              <option value={5}>5</option>
+              <option value={15}>15</option>
+              <option value={30}>30</option>
+              <option value={50}>50</option>
+            </select>
+          </label>
+
+          <label>
+            入力方法：
+            <select
+              value={inputMode}
+              onChange={(e) => setInputMode(e.target.value as InputMode)}
+            >
+              <option value="text">キーボード入力</option>
+              <option value="handwriting">手書き入力</option>
+            </select>
+          </label>
+
+          <label>
+            表示モード：
+            <select
+              value={viewMode}
+              onChange={(e) => setViewMode(e.target.value as ViewMode)}
+            >
+              <option value="test">テスト</option>
+              <option value="flash">単語カード</option>
+            </select>
+          </label>
+
+          <label>
+            出題順：
+            <select
+              value={sessionConfig.shuffle ? 'random' : 'sequential'}
+              onChange={(e) =>
+                setSessionConfig((prev) => ({
+                  ...prev,
+                  shuffle: e.target.value === 'random',
+                }))
+              }
+            >
+              <option value="sequential">昇順</option>
+              <option value="random">ランダム</option>
+            </select>
+          </label>
+
+          <label>
+            例文の表示：
+            <select
+              value={sessionConfig.showExamples}
+              onChange={(e) =>
+                setSessionConfig((prev) => ({
+                  ...prev,
+                  showExamples: e.target.value as ShowExamplesMode,
+                }))
+              }
+            >
+              <option value="auto">多義語のみ</option>
+              <option value="always">常に表示</option>
+              <option value="never">表示しない</option>
+            </select>
+          </label>
+        </div>
+
+        <div style={{ marginTop: '0.75rem' }}>
+          <button onClick={handleStartSession}>通常セッション開始</button>
+          <button
+            onClick={handleStartWrongSession}
+            style={{ marginLeft: '0.75rem' }}
+          >
+            苦手単語モードでセッション開始
+          </button>
+
+          {sessionItems.length > 0 && (
+            <span style={{ marginLeft: '0.75rem', color: '#555' }}>
+              現在のセッション問題数: {sessionItems.length} 問 / ページ数:{' '}
+              {totalPages}
+            </span>
+          )}
+        </div>
+      </section>
+
+      {!wordsData && <div>単語データを読み込み中…</div>}
+
       {wordsData && sessionItems.length === 0 && (
         <div style={{ marginBottom: '1rem' }}>
-          出題設定をして「テスト開始」または「間違えた単語だけ復習」を押してください。
+          出題設定をして「通常セッション開始」または「苦手単語モード」を押してください。
         </div>
       )}
 
@@ -1124,13 +1117,13 @@ export default function App() {
           style={{
             marginBottom: '2rem',
             padding: '1rem',
-            border: '1px solid #eee',
-            borderRadius: 12,
-            background: '#fff',
+            border: '1px solid #ddd',
+            borderRadius: 6,
           }}
         >
-          <h2 style={{ marginTop: 0 }}>
-            ページ {currentPage + 1} / {totalPages}（{startIndex + 1}〜{endIndex} 問）
+          <h2>
+            ページ {currentPage + 1} / {totalPages}（{startIndex + 1}〜
+            {endIndex} 問）
           </h2>
           <p>
             <strong>{isEnToJp ? '英語 → 日本語' : '日本語 → 英語'}</strong>
@@ -1140,7 +1133,6 @@ export default function App() {
             const absIndex = startIndex + idx;
             const answerValue = answers[absIndex] ?? '';
             const mark = marks[absIndex];
-            const showExample = shouldShowExampleInQuestion(word);
 
             return (
               <div
@@ -1148,26 +1140,24 @@ export default function App() {
                 style={{
                   marginBottom: '1rem',
                   paddingBottom: '0.75rem',
-                  borderBottom: '1px dashed #eee',
+                  borderBottom: '1px solid #eee',
                 }}
               >
                 <div style={{ fontSize: '1.1rem' }}>
                   問題 {absIndex + 1}.{' '}
                   <strong>{isEnToJp ? word.english : word.japanese}</strong>
-
-                  {/* 単語読み上げ（テストモード復活） */}
                   {isEnToJp && (
                     <button
                       type="button"
-                      onClick={() => speakEnglish(word.audio_text || word.english)}
+                      onClick={() =>
+                        speakEnglish(word.audio_text || word.english)
+                      }
                       style={{ marginLeft: '0.5rem', fontSize: '0.8rem' }}
                     >
                       🔊 単語
                     </button>
                   )}
-
-                  {/* 例文読み上げ：表示しているときだけ */}
-                  {showExample && word.example_en && (
+                  {word.example_en && (
                     <button
                       type="button"
                       onClick={() => speakEnglish(word.example_en)}
@@ -1178,7 +1168,7 @@ export default function App() {
                   )}
                 </div>
 
-                {showExample && (
+                {shouldShowExampleInQuestion(word) && (
                   <div style={{ fontStyle: 'italic', color: '#555' }}>
                     例文: {isEnToJp ? word.example_en : word.example_jp}
                   </div>
@@ -1197,13 +1187,15 @@ export default function App() {
                             [absIndex]: e.target.value,
                           }))
                         }
-                        style={{ marginLeft: '0.5rem', width: '70%', maxWidth: 420 }}
+                        style={{ marginLeft: '0.5rem', width: '60%' }}
                         placeholder={isEnToJp ? '日本語の意味' : '英語の単語'}
                       />
                     </label>
                   ) : (
                     <div>
-                      <div style={{ marginBottom: '0.25rem' }}>手書きで回答：</div>
+                      <div style={{ marginBottom: '0.25rem' }}>
+                        手書きで回答：
+                      </div>
                       <HandwritingCanvas height={140} />
                     </div>
                   )}
@@ -1212,53 +1204,52 @@ export default function App() {
                 {showAnswers && (
                   <div
                     style={{
-                      marginTop: '0.35rem',
-                      padding: '0.5rem',
-                      border: '1px solid #f0f0f0',
-                      borderRadius: 8,
-                      background: '#fafafa',
+                      marginTop: '0.25rem',
+                      padding: '0.4rem 0.5rem',
+                      border: '1px solid #eee',
                     }}
                   >
                     <div>
                       正解：{isEnToJp ? word.japanese : word.english}
                     </div>
-                    {word.example_jp && (
-                      <div style={{ fontSize: '0.9rem', marginTop: '0.2rem' }}>
-                        例文（日本語）：{word.example_jp}
-                      </div>
-                    )}
-                    {word.example_en && (
-                      <div style={{ fontSize: '0.9rem' }}>
-                        例文（英語）：{word.example_en}
-                      </div>
-                    )}
+                    <div
+                      style={{
+                        fontSize: '0.9rem',
+                        marginTop: '0.2rem',
+                      }}
+                    >
+                      例文（日本語）：{word.example_jp}
+                    </div>
+                    <div style={{ fontSize: '0.9rem' }}>
+                      例文（英語）：{word.example_en}
+                    </div>
 
-                    <div style={{ marginTop: '0.35rem' }}>
+                    <div style={{ marginTop: '0.25rem' }}>
                       自己採点：
                       <button
                         onClick={() =>
-                          setMarks((prev) => ({ ...prev, [absIndex]: 'correct' }))
+                          setMarks((prev) => ({
+                            ...prev,
+                            [absIndex]: 'correct',
+                          }))
                         }
                         style={{
                           marginLeft: '0.5rem',
                           fontWeight: mark === 'correct' ? 'bold' : 'normal',
-                          background: mark === 'correct' ? '#d1e7dd' : undefined,
-                          borderRadius: 6,
-                          padding: '0.15rem 0.5rem',
                         }}
                       >
                         ○ 正解
                       </button>
                       <button
                         onClick={() =>
-                          setMarks((prev) => ({ ...prev, [absIndex]: 'wrong' }))
+                          setMarks((prev) => ({
+                            ...prev,
+                            [absIndex]: 'wrong',
+                          }))
                         }
                         style={{
                           marginLeft: '0.5rem',
                           fontWeight: mark === 'wrong' ? 'bold' : 'normal',
-                          background: mark === 'wrong' ? '#f8d7da' : undefined,
-                          borderRadius: 6,
-                          padding: '0.15rem 0.5rem',
                         }}
                       >
                         × 不正解
@@ -1277,7 +1268,10 @@ export default function App() {
           </div>
 
           <div style={{ marginTop: '0.75rem' }}>
-            <button onClick={handleSaveCurrentPage} disabled={isSavingPage || pageItems.length === 0}>
+            <button
+              onClick={handleSaveCurrentPage}
+              disabled={isSavingPage || pageItems.length === 0}
+            >
               このページの採点を保存して
               {currentPage + 1 < totalPages ? '次のページへ' : 'セッション終了'}
             </button>
@@ -1291,12 +1285,11 @@ export default function App() {
           style={{
             marginBottom: '2rem',
             padding: '1rem',
-            border: '1px solid #eee',
-            borderRadius: 12,
-            background: '#fff',
+            border: '1px solid #ddd',
+            borderRadius: 6,
           }}
         >
-          <h2 style={{ marginTop: 0 }}>単語カード</h2>
+          <h2>単語カードモード</h2>
           <p>
             全 {sessionItems.length} 枚 / 現在 {cardIndex + 1} 枚目（
             {isEnToJp ? '英語 → 日本語' : '日本語 → 英語'}）
@@ -1305,16 +1298,19 @@ export default function App() {
           {sessionItems[cardIndex] && (
             <div
               style={{
-                border: '1px solid #ddd',
-                borderRadius: 12,
+                border: '1px solid #ccc',
+                borderRadius: 8,
                 padding: '1rem',
                 background: '#fffdf8',
                 minHeight: '140px',
               }}
             >
-              <div style={{ fontSize: '1.35rem', marginBottom: '0.5rem' }}>
+              <div style={{ fontSize: '1.3rem', marginBottom: '0.5rem' }}>
+                Q:{' '}
                 <strong>
-                  {isEnToJp ? sessionItems[cardIndex].english : sessionItems[cardIndex].japanese}
+                  {isEnToJp
+                    ? sessionItems[cardIndex].english
+                    : sessionItems[cardIndex].japanese}
                 </strong>
               </div>
 
@@ -1323,7 +1319,10 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() =>
-                      speakEnglish(sessionItems[cardIndex].audio_text || sessionItems[cardIndex].english)
+                      speakEnglish(
+                        sessionItems[cardIndex].audio_text ||
+                          sessionItems[cardIndex].english
+                      )
                     }
                     style={{ marginRight: '0.5rem', fontSize: '0.85rem' }}
                   >
@@ -1333,7 +1332,9 @@ export default function App() {
                 {sessionItems[cardIndex].example_en && (
                   <button
                     type="button"
-                    onClick={() => speakEnglish(sessionItems[cardIndex].example_en)}
+                    onClick={() =>
+                      speakEnglish(sessionItems[cardIndex].example_en)
+                    }
                     style={{ fontSize: '0.85rem' }}
                   >
                     🔊 例文
@@ -1341,7 +1342,10 @@ export default function App() {
                 )}
               </div>
 
-              <button type="button" onClick={() => setShowCardAnswer((prev) => !prev)}>
+              <button
+                type="button"
+                onClick={() => setShowCardAnswer((prev) => !prev)}
+              >
                 {showCardAnswer ? '答えを隠す' : '答えを表示'}
               </button>
 
@@ -1350,29 +1354,40 @@ export default function App() {
                   <div>
                     答え：
                     <strong>
-                      {isEnToJp ? sessionItems[cardIndex].japanese : sessionItems[cardIndex].english}
+                      {isEnToJp
+                        ? sessionItems[cardIndex].japanese
+                        : sessionItems[cardIndex].english}
                     </strong>
                   </div>
-                  {sessionItems[cardIndex].example_jp && (
-                    <div style={{ marginTop: '0.25rem', fontSize: '0.95rem' }}>
-                      例文（日本語）：{sessionItems[cardIndex].example_jp}
-                    </div>
-                  )}
-                  {sessionItems[cardIndex].example_en && (
-                    <div style={{ fontSize: '0.95rem' }}>
-                      例文（英語）：{sessionItems[cardIndex].example_en}
-                    </div>
-                  )}
+                  <div
+                    style={{
+                      marginTop: '0.25rem',
+                      fontSize: '0.95rem',
+                    }}
+                  >
+                    例文（日本語）：{sessionItems[cardIndex].example_jp}
+                  </div>
+                  <div style={{ fontSize: '0.95rem' }}>
+                    例文（英語）：{sessionItems[cardIndex].example_en}
+                  </div>
                 </div>
               )}
             </div>
           )}
 
-          <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem' }}>
+          <div
+            style={{
+              marginTop: '0.75rem',
+              display: 'flex',
+              gap: '0.5rem',
+            }}
+          >
             <button
               type="button"
               onClick={() => {
-                setCardIndex((prev) => (prev === 0 ? sessionItems.length - 1 : prev - 1));
+                setCardIndex((prev) =>
+                  prev === 0 ? sessionItems.length - 1 : prev - 1
+                );
                 setShowCardAnswer(false);
               }}
             >
@@ -1381,7 +1396,9 @@ export default function App() {
             <button
               type="button"
               onClick={() => {
-                setCardIndex((prev) => (prev + 1 >= sessionItems.length ? 0 : prev + 1));
+                setCardIndex((prev) =>
+                  prev + 1 >= sessionItems.length ? 0 : prev + 1
+                );
                 setShowCardAnswer(false);
               }}
             >
@@ -1396,24 +1413,19 @@ export default function App() {
         style={{
           marginBottom: '2rem',
           padding: '1rem',
-          border: '1px solid #eee',
-          borderRadius: 12,
-          background: '#fff',
+          border: '1px solid #ddd',
+          borderRadius: 6,
         }}
       >
-        <h2 style={{ fontSize: '1.1rem', marginTop: 0 }}>マイページ</h2>
-
-        {!userId && <div>ログインすると記録が表示されます。</div>}
-
-        {userId && (
-          <button
-            onClick={handleFetchMyPage}
-            disabled={isLoadingOverview || isLoadingMyPageWrong}
-            style={{ fontSize: '0.9rem' }}
-          >
-            {isLoadingOverview || isLoadingMyPageWrong ? '読み込み中…' : '記録を更新'}
-          </button>
-        )}
+        <h2 style={{ fontSize: '1.1rem' }}>マイページ（自分の記録）</h2>
+        <button
+          onClick={handleFetchMyPage}
+          disabled={isLoadingOverview || isLoadingMyPageWrong}
+        >
+          {isLoadingOverview || isLoadingMyPageWrong
+            ? '読み込み中…'
+            : '自分の記録を更新'}
+        </button>
 
         {userOverview && (
           <div style={{ marginTop: '0.75rem' }}>
@@ -1421,60 +1433,87 @@ export default function App() {
               ユーザー：<strong>{userOverview.display_name}</strong>
             </div>
             <div style={{ marginTop: '0.25rem' }}>
-              累計 正解：{userOverview.total_correct} / 不正解：{userOverview.total_wrong}
+              累計 正解：{userOverview.total_correct} / 不正解：
+              {userOverview.total_wrong}
+            </div>
+            <div>
+              累計 問題数：
+              {userOverview.total_correct + userOverview.total_wrong}（
+              {userOverview.total_correct + userOverview.total_wrong > 0
+                ? Math.round(
+                    (userOverview.total_correct /
+                      (userOverview.total_correct +
+                        userOverview.total_wrong)) *
+                      100
+                  )
+                : 0}
+              % 正解）
             </div>
             <div>今週の正解数：{userOverview.weekly_correct_total}</div>
             <div>
-              最終回答日時：{formatDateTime(userOverview.last_answered_at ?? undefined)}
+              最終回答日時：
+              {formatDateTime(userOverview.last_answered_at ?? undefined)}
             </div>
           </div>
         )}
 
         {/* 表示名変更 */}
-        {userId && (
-          <div style={{ marginTop: '1rem' }}>
-            <h3 style={{ fontSize: '1rem' }}>表示名の変更</h3>
-            <div>
-              <input
-                type="text"
-                value={displayNameEdit}
-                onChange={(e) => setDisplayNameEdit(e.target.value)}
-                placeholder="ランキングなどに表示する名前"
-                style={{ width: '60%', maxWidth: 280, marginRight: '0.5rem' }}
-              />
-              <button type="button" onClick={handleUpdateDisplayName}>保存</button>
-            </div>
+        <div style={{ marginTop: '1rem' }}>
+          <h3 style={{ fontSize: '1rem' }}>表示名の変更</h3>
+          <div>
+            <input
+              type="text"
+              value={displayNameEdit}
+              onChange={(e) => setDisplayNameEdit(e.target.value)}
+              placeholder="ランキングなどに表示する名前"
+              style={{ width: '60%', maxWidth: 280, marginRight: '0.5rem' }}
+            />
+            <button type="button" onClick={handleUpdateDisplayName}>
+              保存
+            </button>
           </div>
-        )}
+          <p
+            style={{
+              fontSize: '0.85rem',
+              color: '#555',
+              marginTop: '0.25rem',
+            }}
+          >
+            ランキングやマイページに表示される名前です。
+          </p>
+        </div>
 
         {/* よく間違える単語 */}
-        {userId && (
-          <div style={{ marginTop: '1rem' }}>
-            <h3 style={{ fontSize: '1rem' }}>よく間違える単語 Top10</h3>
-            {!myPageWrongItems && !isLoadingMyPageWrong && <p>まだ苦手単語が記録されていません。</p>}
-            {myPageWrongItems && myPageWrongItems.length === 0 && <p>まだ苦手単語が記録されていません。</p>}
-            {myPageWrongItems && myPageWrongItems.length > 0 && wordsData && (
-              <ol style={{ marginTop: '0.5rem' }}>
-                {myPageWrongItems.map((stat) => {
-                  const deck = wordsData.decks[stat.deck] || wordsData.decks['core'];
-                  const word = deck.items.find((w) => w.id === stat.item_id);
-                  return (
-                    <li key={stat.item_id} style={{ marginBottom: '0.3rem' }}>
-                      {word ? (
-                        <>
-                          <strong>{word.english}</strong> / {word.japanese}（
-                          間違え {stat.wrong_total} 回 / 正解 {stat.correct_total} 回）
-                        </>
-                      ) : (
-                        <>item_id: {stat.item_id}（単語データなし）</>
-                      )}
-                    </li>
-                  );
-                })}
-              </ol>
-            )}
-          </div>
-        )}
+        <div style={{ marginTop: '1rem' }}>
+          <h3 style={{ fontSize: '1rem' }}>よく間違える単語 Top10</h3>
+          {!myPageWrongItems && !isLoadingMyPageWrong && (
+            <p>まだ苦手単語が記録されていません。</p>
+          )}
+          {myPageWrongItems && myPageWrongItems.length === 0 && (
+            <p>まだ苦手単語が記録されていません。</p>
+          )}
+          {myPageWrongItems && myPageWrongItems.length > 0 && wordsData && (
+            <ol style={{ marginTop: '0.5rem' }}>
+              {myPageWrongItems.map((stat) => {
+                const deck =
+                  wordsData.decks[stat.deck] || wordsData.decks['core'];
+                const word = deck.items.find((w) => w.id === stat.item_id);
+                return (
+                  <li key={stat.item_id} style={{ marginBottom: '0.3rem' }}>
+                    {word ? (
+                      <>
+                        <strong>{word.english}</strong> / {word.japanese}（
+                        間違え {stat.wrong_total} 回 / 正解 {stat.correct_total} 回）
+                      </>
+                    ) : (
+                      <>item_id: {stat.item_id}（単語データなし）</>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+        </div>
       </section>
 
       {/* ランキング */}
@@ -1482,25 +1521,27 @@ export default function App() {
         style={{
           marginBottom: '2rem',
           padding: '1rem',
-          border: '1px solid #eee',
-          borderRadius: 12,
-          background: '#fff',
+          border: '1px solid #ddd',
+          borderRadius: 6,
         }}
       >
-        <h2 style={{ fontSize: '1.1rem', marginTop: 0 }}>ランキング（今週の正解数）</h2>
+        <h2 style={{ fontSize: '1.1rem' }}>ランキング（今週の正解数）</h2>
         <button onClick={handleFetchRanking} disabled={isLoadingRanking}>
           {isLoadingRanking ? 'ランキング取得中…' : 'ランキングを更新'}
         </button>
 
         {ranking && ranking.length === 0 && (
-          <p style={{ marginTop: '0.5rem' }}>まだ今週の正解記録がありません。</p>
+          <p style={{ marginTop: '0.5rem' }}>
+            まだ今週の正解記録がありません。
+          </p>
         )}
 
         {ranking && ranking.length > 0 && (
           <ol style={{ marginTop: '0.75rem' }}>
             {ranking.slice(0, 20).map((entry, index) => (
               <li key={entry.user_id} style={{ marginBottom: '0.25rem' }}>
-                {index + 1}位：{entry.display_name} さん（{entry.weekly_correct_total} 問）
+                {index + 1}位：{entry.display_name} さん（
+                {entry.weekly_correct_total} 問）
               </li>
             ))}
           </ol>
@@ -1509,3 +1550,5 @@ export default function App() {
     </div>
   );
 }
+
+export default App;
