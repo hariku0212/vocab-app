@@ -340,6 +340,32 @@ export default function App() {
   const googleBtnRef = useRef<HTMLDivElement | null>(null);
   const [booting, setBooting] = useState(false);
 
+  // ★追加: ログイン復元（UIは変えず挙動だけ安定化）
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = localStorage.getItem("auth_user_json");
+        if (!saved) return;
+        const parsed = JSON.parse(saved) as User | null;
+        if (!parsed?.user_id) return;
+        setBooting(true);
+        setUser(parsed);
+
+        // 設定復元 + MyPage系prefetch
+        await loadSettingsFromServer(parsed.user_id);
+        const bid = selectedBookIdRef.current || "";
+        const sid = selectedSetIdRef.current || "core";
+        await prefetchUserData(parsed, bid, sid);
+      } catch (e) {
+        console.warn("restore auth failed", e);
+        localStorage.removeItem("auth_user_json");
+      } finally {
+        setBooting(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     const id = "google-gsi";
     if (document.getElementById(id)) {
@@ -437,6 +463,9 @@ export default function App() {
           };
           setUser(newUser);
 
+          // ★追加: ログイン保存（UI変えず、リロード/ iPhone落ち対策）
+          localStorage.setItem("auth_user_json", JSON.stringify(newUser));
+
           // ①設定復元
           await loadSettingsFromServer(userId);
 
@@ -447,6 +476,7 @@ export default function App() {
         } catch (e) {
           console.error("google login failed", e);
           setUser(null);
+          localStorage.removeItem("auth_user_json");
         } finally {
           setBooting(false);
         }
@@ -607,8 +637,13 @@ export default function App() {
         displayName: name,
       });
       if (out.ok) {
-        setUser({ ...user, display_name: name });
+        const updated = { ...user, display_name: name };
+        setUser(updated);
         setOverview((p) => (p ? { ...p, display_name: name } : p));
+
+        // ★追加: 表示名更新も保存（UI不変）
+        localStorage.setItem("auth_user_json", JSON.stringify(updated));
+
         alert("表示名を保存しました！");
         setShowMyPage(false);
         return true;
