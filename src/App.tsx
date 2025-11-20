@@ -233,6 +233,7 @@ function App() {
   const [driveInterval, setDriveInterval] = useState<number>(2500);
   const [drivePattern, setDrivePattern] =
     useState<DrivePattern>('en_ja_ex_exj');
+  const driveTimerRef = useRef<number | null>(null);
 
   // ---- その他 ----
   const testTopRef = useRef<HTMLDivElement | null>(null);
@@ -245,19 +246,9 @@ function App() {
           width: '100%',
           maxWidth: '100%',
           margin: '0 auto',
-          padding: '1rem 0.9rem 1.5rem',
+          padding: '1.2rem 0.6rem 1.7rem',
           borderRadius: 0,
           background: '#ffffff',
-        }
-      : viewportKind === 'tablet'
-      ? {
-          width: '100%',
-          maxWidth: 960,
-          margin: '0 auto',
-          padding: '1.4rem 1.4rem 2rem',
-          borderRadius: 20,
-          background: '#ffffff',
-          boxShadow: '0 18px 45px rgba(15,23,42,0.35)',
         }
       : {
           width: '100%',
@@ -290,16 +281,35 @@ function App() {
     if (!wordsData) return [];
     const set = wordsData.decks[deckId];
     if (!set) return [];
-    const s = new Set<string>();
+
+    const explicit = new Set<string>();
+    const fallback = new Set<string>();
+
     set.items.forEach((item) => {
-      item.tags.forEach((tag) => {
-        if (tag.startsWith('sub:')) {
-          s.add(tag.slice(4));
+      item.tags.forEach((tagRaw) => {
+        const tag = tagRaw.trim();
+        if (!tag) return;
+        const lower = tag.toLowerCase();
+        if (
+          lower.startsWith('book:') ||
+          lower.startsWith('deck:') ||
+          lower.startsWith('level:')
+        ) {
+          return;
+        }
+        if (lower.startsWith('sub:')) {
+          explicit.add(tag.slice(4));
+        } else {
+          fallback.add(tag);
         }
       });
     });
-    return Array.from(s).sort();
+
+    const base = explicit.size > 0 ? explicit : fallback;
+    return Array.from(base).sort();
   };
+
+  const canSwitchView = sessionItems.length === 0;
 
   // ===== エフェクト類 =====
 
@@ -353,7 +363,7 @@ function App() {
     load();
   }, []);
 
-  // 英語 / 日本語 voice 選択
+  // 英語 / 日本語 voice 選択（ベースライン）
   useEffect(() => {
     if (typeof window === 'undefined' || !window.speechSynthesis) return;
     const synth = window.speechSynthesis;
@@ -399,7 +409,7 @@ function App() {
     };
   }, []);
 
-  // メッセージ自動消去
+  // メッセージ自動消去（主にエラー用）
   useEffect(() => {
     if (!message) return;
     const id = setTimeout(() => setMessage(null), 4000);
@@ -434,7 +444,7 @@ function App() {
     setShowCardAnswer(false);
   }, [viewMode, sessionItems]);
 
-  // ドライブモード制御（自動進行＋読み上げ）
+  // ドライブモード制御（読み上げ→onend→待ち時間→次へ）
   useEffect(() => {
     if (
       !driveMode ||
@@ -446,6 +456,7 @@ function App() {
       return;
     }
 
+    const synth = window.speechSynthesis;
     const steps = driveSequence;
     if (steps.length === 0) return;
 
@@ -457,7 +468,10 @@ function App() {
     ): { text: string; lang: 'en' | 'ja' } | null => {
       switch (kind) {
         case 'word_en':
-          return { text: currentWord.audio_text || currentWord.english, lang: 'en' };
+          return {
+            text: currentWord.audio_text || currentWord.english,
+            lang: 'en',
+          };
         case 'meaning_jp':
           return { text: currentWord.japanese, lang: 'ja' };
         case 'example_en':
@@ -473,7 +487,6 @@ function App() {
       }
     };
 
-    // 空テキストのステップはスキップ
     let stepIndex = driveStepIndex;
     let info = getTextForStep(steps[stepIndex]);
     let safety = 0;
@@ -487,72 +500,123 @@ function App() {
       setDriveStepIndex(stepIndex);
     }
 
-    const synth = window.speechSynthesis;
+    // 前回のタイマーをクリア
+    if (driveTimerRef.current != null) {
+      clearTimeout(driveTimerRef.current);
+      driveTimerRef.current = null;
+    }
+
     synth.cancel();
     const utter = new SpeechSynthesisUtterance(info.text);
+
     if (info.lang === 'en') {
-      if (englishVoice) {
-        utter.voice = englishVoice;
-        utter.lang = englishVoice.lang;
+      const voices = synth.getVoices();
+      let v = englishVoice;
+      if (!v && voices.length > 0) {
+        const enVoices = voices.filter((vv) =>
+          (vv.lang || '').toLowerCase().startsWith('en')
+        );
+        v = enVoices[0] || voices[0];
+        if (v) setEnglishVoice(v);
+      }
+      if (v) {
+        utter.voice = v;
+        utter.lang = v.lang;
       } else {
         utter.lang = 'en-US';
       }
       utter.rate = 0.9;
-      utter.pitch = 1.0;
     } else {
-      if (japaneseVoice) {
-        utter.voice = japaneseVoice;
-        utter.lang = japaneseVoice.lang;
+      const voices = synth.getVoices();
+      let v = japaneseVoice;
+      if (!v && voices.length > 0) {
+        const jaVoices = voices.filter((vv) =>
+          (vv.lang || '').toLowerCase().startsWith('ja')
+        );
+        v = jaVoices[0] || null;
+        if (v) setJapaneseVoice(v);
+      }
+      if (v) {
+        utter.voice = v;
+        utter.lang = v.lang;
       } else {
         utter.lang = 'ja-JP';
       }
     }
+
+    utter.onend = () => {
+      if (!driveMode || !driveRunning) return;
+      if (driveTimerRef.current != null) {
+        clearTimeout(driveTimerRef.current);
+      }
+      driveTimerRef.current = window.setTimeout(() => {
+        setDriveStepIndex((prevIndex) => {
+          if (!driveMode || !driveRunning || sessionItems.length === 0) {
+            return prevIndex;
+          }
+          const localSteps = driveSequence;
+          if (localSteps.length === 0) return prevIndex;
+
+          const nextIndex = (prevIndex + 1) % localSteps.length;
+          if (nextIndex === 0) {
+            setDriveIndex((prevWordIndex) => {
+              const nextWord = prevWordIndex + 1;
+              return nextWord >= sessionItems.length ? 0 : nextWord;
+            });
+          }
+          return nextIndex;
+        });
+      }, driveInterval);
+    };
+
+    utter.onerror = () => {
+      // エラー時も onend と同様に扱う
+      utter.onend?.(new Event('end') as any);
+    };
+
     synth.speak(utter);
 
-    const timer = setTimeout(() => {
-      setDriveStepIndex((prevIndex) => {
-        if (!driveMode || !driveRunning || sessionItems.length === 0) {
-          return prevIndex;
-        }
-        const localSteps = driveSequence;
-        if (localSteps.length === 0) return prevIndex;
-
-        const nextIndex = (prevIndex + 1) % localSteps.length;
-        if (nextIndex === 0) {
-          setDriveIndex((prevWordIndex) => {
-            const nextWord = prevWordIndex + 1;
-            return nextWord >= sessionItems.length ? 0 : nextWord;
-          });
-        }
-        return nextIndex;
-      });
-    }, driveInterval);
-
-    return () => clearTimeout(timer);
+    return () => {
+      if (driveTimerRef.current != null) {
+        clearTimeout(driveTimerRef.current);
+        driveTimerRef.current = null;
+      }
+      synth.cancel();
+    };
   }, [
     driveMode,
     driveRunning,
-    driveInterval,
     driveIndex,
     driveStepIndex,
-    driveSequence,
+    drivePattern,
     sessionItems,
     englishVoice,
     japaneseVoice,
+    driveInterval,
   ]);
 
   // ===== 音声系関数 =====
 
   const speakEnglish = (text: string) => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
     const synth = window.speechSynthesis;
     if (!text) return;
 
+    let voice = englishVoice;
+    const voices = synth.getVoices();
+    if (!voice && voices.length > 0) {
+      const enVoices = voices.filter((v) =>
+        (v.lang || '').toLowerCase().startsWith('en')
+      );
+      voice = enVoices[0] || voices[0];
+      if (voice) setEnglishVoice(voice);
+    }
+
     synth.cancel();
     const utter = new SpeechSynthesisUtterance(text);
-    if (englishVoice) {
-      utter.voice = englishVoice;
-      utter.lang = englishVoice.lang;
+    if (voice) {
+      utter.voice = voice;
+      utter.lang = voice.lang;
     } else {
       utter.lang = 'en-US';
     }
@@ -562,15 +626,25 @@ function App() {
   };
 
   const speakJapanese = (text: string) => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
     const synth = window.speechSynthesis;
     if (!text) return;
 
+    let voice = japaneseVoice;
+    const voices = synth.getVoices();
+    if (!voice && voices.length > 0) {
+      const jaVoices = voices.filter((v) =>
+        (v.lang || '').toLowerCase().startsWith('ja')
+      );
+      voice = jaVoices[0] || null;
+      if (voice) setJapaneseVoice(voice);
+    }
+
     synth.cancel();
     const utter = new SpeechSynthesisUtterance(text);
-    if (japaneseVoice) {
-      utter.voice = japaneseVoice;
-      utter.lang = japaneseVoice.lang;
+    if (voice) {
+      utter.voice = voice;
+      utter.lang = voice.lang;
     } else {
       utter.lang = 'ja-JP';
     }
@@ -599,7 +673,6 @@ function App() {
       setDisplayName(localDisplay);
       setShowSettings(false);
       setShowMyPage(false);
-      setMessage('ログインしました');
 
       const body = {
         action: 'upsertUser',
@@ -620,6 +693,7 @@ function App() {
         });
       } catch (e) {
         console.error(e);
+        // 送信失敗だけエラー表示
         setMessage('ユーザー情報の送信に失敗しました');
       }
     } catch (e) {
@@ -634,7 +708,6 @@ function App() {
     setDisplayName(id);
     setShowSettings(false);
     setShowMyPage(false);
-    setMessage('デバッグ用ユーザーでログインしました');
 
     const body = {
       action: 'upsertUser',
@@ -648,7 +721,10 @@ function App() {
       mode: 'no-cors',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(body),
-    }).catch((e) => console.error(e));
+    }).catch((e) => {
+      console.error(e);
+      setMessage('ユーザー情報の送信に失敗しました');
+    });
   };
 
   // ===== 出題ロジック =====
@@ -680,31 +756,16 @@ function App() {
       if (sessionConfig.mode === 'index') {
         const start = Math.max(1, sessionConfig.startIndex);
         const end = Math.max(start, sessionConfig.endIndex);
-        const expectedCount = end - start + 1;
 
         filtered = set.items.filter((item) => {
           const idx = item.bookIndex ?? 0;
           return idx >= start && idx <= end;
         });
-
-        setMessage(
-          `番号指定モード: ${getSetLabel(
-            sessionConfig.deckId
-          )} / 範囲 ${start}〜${end} / 想定: ${expectedCount}（実際: ${filtered.length} 問）`
-        );
       } else {
         filtered = set.items.filter((item) => {
           if (sessionConfig.level === 'all') return true;
           return item.level === sessionConfig.level;
         });
-
-        const levelLabel =
-          sessionConfig.level === 'all' ? '全レベル' : `レベル ${sessionConfig.level}`;
-        setMessage(
-          `レベル別モード: ${getSetLabel(
-            sessionConfig.deckId
-          )} / ${levelLabel} / 問題数: ${filtered.length}`
-        );
       }
     } else {
       filtered = set.items.slice();
@@ -712,20 +773,10 @@ function App() {
       if (sessionConfig.subCategory !== 'all') {
         filtered = filtered.filter((item) =>
           item.tags.some(
-            (tag) => tag === `sub:${sessionConfig.subCategory}`
+            (tag) => tag === `sub:${sessionConfig.subCategory}` || tag === sessionConfig.subCategory
           )
         );
       }
-
-      const subLabel =
-        sessionConfig.subCategory === 'all'
-          ? '全サブカテゴリ'
-          : `サブカテゴリ:${sessionConfig.subCategory}`;
-      setMessage(
-        `セット: ${getSetLabel(
-          sessionConfig.deckId
-        )} / ${subLabel} / 問題数: ${filtered.length}`
-      );
     }
 
     if (sessionConfig.shuffle) {
@@ -815,8 +866,6 @@ function App() {
       setDriveRunning(false);
       setDriveIndex(0);
       setDriveStepIndex(0);
-
-      setMessage(`苦手単語モード開始: ${wordList.length} 問`);
     } catch (e) {
       console.error(e);
       setMessage('苦手単語モード取得時にエラーが発生しました');
@@ -933,13 +982,11 @@ function App() {
         body: JSON.stringify(payload),
       });
 
-      setMessage('このページの成績を保存しました（GAS に送信）');
-
       if (currentPage + 1 < totalPages) {
         setCurrentPage((prev) => prev + 1);
         setShowAnswers(false);
       } else {
-        setMessage('セッションが終了しました（全ページ保存済み）');
+        // セッション終了。メッセージは特に出さない。
       }
     } catch (e) {
       console.error(e);
@@ -1041,7 +1088,7 @@ function App() {
       setUserOverview((prev) =>
         prev ? { ...prev, display_name: newName } : prev
       );
-      setMessage('表示名を更新しました');
+      // 成功メッセージは出さない
     } catch (e) {
       console.error(e);
       setMessage('表示名の更新に失敗しました');
@@ -1168,7 +1215,6 @@ function App() {
                     setSessionConfig((prev) => ({
                       ...prev,
                       deckId: e.target.value,
-                      // core 以外では番号指定は使わない
                       mode:
                         e.target.value === 'core'
                           ? prev.mode
@@ -1251,6 +1297,7 @@ function App() {
                       style={{
                         width: '4.5rem',
                         marginLeft: '0.25rem',
+                        fontSize: '16px',
                       }}
                     />
                   </label>
@@ -1271,6 +1318,7 @@ function App() {
                       style={{
                         width: '4.5rem',
                         marginLeft: '0.25rem',
+                        fontSize: '16px',
                       }}
                     />
                   </label>
@@ -1386,7 +1434,8 @@ function App() {
         style={{
           minHeight: '100vh',
           margin: 0,
-          padding: '2rem 1rem',
+          padding:
+            viewportKind === 'mobile' ? '1.3rem 0.3rem' : '2rem 1rem',
           background:
             'radial-gradient(circle at top, #1d4ed8 0, #0f172a 55%, #020617 100%)',
           color: '#f9fafb',
@@ -1424,9 +1473,9 @@ function App() {
                 marginBottom: '1rem',
                 padding: '0.6rem 0.8rem',
                 borderRadius: 999,
-                background: '#eff6ff',
-                color: '#1e3a8a',
-                border: '1px solid #bfdbfe',
+                background: '#fee2e2',
+                color: '#7f1d1d',
+                border: '1px solid #fecaca',
                 fontSize: '0.85rem',
               }}
             >
@@ -1532,7 +1581,8 @@ function App() {
       style={{
         minHeight: '100vh',
         margin: 0,
-        padding: '2rem 1rem',
+        padding:
+          viewportKind === 'mobile' ? '1.3rem 0.3rem' : '2rem 1rem',
         background:
           'radial-gradient(circle at top, #1d4ed8 0, #0f172a 55%, #020617 100%)',
         color: '#0f172a',
@@ -1659,16 +1709,16 @@ function App() {
           </div>
         </header>
 
-        {/* メッセージ */}
+        {/* メッセージ（エラーなどのみ） */}
         {message && (
           <div
             style={{
               marginBottom: '1rem',
               padding: '0.65rem 0.9rem',
               borderRadius: 999,
-              background: '#eff6ff',
-              color: '#1e3a8a',
-              border: '1px solid #bfdbfe',
+              background: '#fee2e2',
+              color: '#7f1d1d',
+              border: '1px solid #fecaca',
               fontSize: '0.85rem',
             }}
           >
@@ -1689,32 +1739,42 @@ function App() {
         >
           <button
             type="button"
-            onClick={() => setViewMode('test')}
+            onClick={() => {
+              if (!canSwitchView) return;
+              setViewMode('test');
+            }}
+            disabled={!canSwitchView}
             style={{
               borderRadius: 999,
               border: 'none',
               padding: '0.35rem 0.9rem',
-              cursor: 'pointer',
               fontSize: '0.85rem',
               fontWeight: viewMode === 'test' ? 600 : 400,
               background: viewMode === 'test' ? accent : 'transparent',
               color: viewMode === 'test' ? '#ffffff' : '#374151',
+              cursor: canSwitchView ? 'pointer' : 'default',
+              opacity: canSwitchView ? 1 : 0.7,
             }}
           >
             📝 テスト
           </button>
           <button
             type="button"
-            onClick={() => setViewMode('flash')}
+            onClick={() => {
+              if (!canSwitchView) return;
+              setViewMode('flash');
+            }}
+            disabled={!canSwitchView}
             style={{
               borderRadius: 999,
               border: 'none',
               padding: '0.35rem 0.9rem',
-              cursor: 'pointer',
               fontSize: '0.85rem',
               fontWeight: viewMode === 'flash' ? 600 : 400,
               background: viewMode === 'flash' ? accent : 'transparent',
               color: viewMode === 'flash' ? '#ffffff' : '#374151',
+              cursor: canSwitchView ? 'pointer' : 'default',
+              opacity: canSwitchView ? 1 : 0.7,
             }}
           >
             🃏 単語カード
@@ -1933,6 +1993,7 @@ function App() {
                               marginLeft: '0.5rem',
                               width: '60%',
                               maxWidth: 400,
+                              fontSize: '16px',
                             }}
                             placeholder={
                               isEnToJp ? '日本語の意味' : '英語の単語'
@@ -2186,7 +2247,7 @@ function App() {
                       gap: '0.35rem',
                     }}
                   >
-                    速度：
+                    速度（読み終わり→次へ）：
                     <input
                       type="range"
                       min={1500}
@@ -2203,7 +2264,7 @@ function App() {
                         color: '#4b5563',
                       }}
                     >
-                      {driveInterval / 1000} 秒/ステップ
+                      {driveInterval / 1000} 秒
                     </span>
                   </label>
                 )}
@@ -2491,7 +2552,7 @@ function App() {
                       gap: '0.35rem',
                     }}
                   >
-                    速度：
+                    速度（読み終わり→次へ）：
                     <input
                       type="range"
                       min={1500}
@@ -2502,7 +2563,7 @@ function App() {
                         setDriveInterval(Number(e.target.value))
                       }
                     />
-                    <span>{driveInterval / 1000} 秒/ステップ</span>
+                    <span>{driveInterval / 1000} 秒</span>
                   </label>
                 </div>
 
@@ -2905,6 +2966,7 @@ function App() {
                     width: '60%',
                     maxWidth: 280,
                     marginRight: '0.5rem',
+                    fontSize: '16px',
                   }}
                 />
                 <button
@@ -3004,7 +3066,7 @@ function App() {
                 )}
             </section>
 
-            {/* ランキング案内（現時点では非表示扱い） */}
+            {/* ランキング案内（現時点では非表示扱いの説明だけ） */}
             <section
               style={{
                 marginBottom: 0,
