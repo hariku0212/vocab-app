@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import HandwritingCanvas from "./HandwritingCanvas";
 
 /* ================================
    設定
@@ -185,223 +186,6 @@ function useSimpleFullscreen<T extends HTMLElement>() {
 }
 
 /* ================================
-   手書き（高性能版へ復帰）
-================================ */
-type Point = { x: number; y: number; pressure: number; t: number };
-type Stroke = Point[];
-
-function HandwriteBox({
-  height = 120,
-  valueDataUrl,
-  onChangeDataUrl,
-  disabled,
-}: {
-  height?: number;
-  valueDataUrl?: string;
-  onChangeDataUrl?: (dataUrl: string) => void;
-  disabled?: boolean;
-}) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const strokesRef = useRef<Stroke[]>([]);
-  const curRef = useRef<Stroke | null>(null);
-  const isDrawingRef = useRef(false);
-  const rafRef = useRef<number | null>(null);
-
-  const redrawAll = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = "#111";
-
-    const drawStroke = (s: Stroke) => {
-      if (s.length < 2) return;
-      ctx.beginPath();
-      ctx.moveTo(s[0].x, s[0].y);
-      for (let i = 1; i < s.length - 1; i++) {
-        const p0 = s[i];
-        const p1 = s[i + 1];
-        const mx = (p0.x + p1.x) / 2;
-        const my = (p0.y + p1.y) / 2;
-        const w = Math.max(1.2, 2.8 * (p0.pressure || 0.5));
-        ctx.lineWidth = w;
-        ctx.quadraticCurveTo(p0.x, p0.y, mx, my);
-      }
-      ctx.stroke();
-    };
-
-    strokesRef.current.forEach(drawStroke);
-    if (curRef.current) drawStroke(curRef.current);
-  };
-
-  const requestRedraw = () => {
-    if (rafRef.current != null) return;
-    rafRef.current = requestAnimationFrame(() => {
-      rafRef.current = null;
-      redrawAll();
-    });
-  };
-
-  const getLocalPoint = (e: PointerEvent, canvas: HTMLCanvasElement) => {
-    const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    return {
-      x: (e.clientX - rect.left) * dpr,
-      y: (e.clientY - rect.top) * dpr,
-      pressure: e.pressure || 0.5,
-      t: performance.now(),
-    } as Point;
-  };
-
-  useEffect(() => {
-    const canvas = canvasRef.current!;
-    const resize = () => {
-      const rect = canvas.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      const w = rect.width * dpr;
-      const h = rect.height * dpr;
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
-      }
-      requestRedraw();
-    };
-
-    resize();
-    const ro = new ResizeObserver(resize);
-    ro.observe(canvas);
-    window.addEventListener("scroll", resize, { passive: true });
-    window.addEventListener("resize", resize);
-
-    return () => {
-      ro.disconnect();
-      window.removeEventListener("scroll", resize);
-      window.removeEventListener("resize", resize);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (!valueDataUrl) return;
-    const img = new Image();
-    img.onload = () => {
-      const canvas = canvasRef.current!;
-      const ctx = canvas.getContext("2d")!;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    };
-    img.src = valueDataUrl;
-  }, [valueDataUrl]);
-
-  const exportDataUrl = () => {
-    const canvas = canvasRef.current!;
-    onChangeDataUrl?.(canvas.toDataURL("image/png"));
-  };
-
-  const clear = () => {
-    strokesRef.current = [];
-    curRef.current = null;
-    requestRedraw();
-    exportDataUrl();
-  };
-
-  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (disabled) return;
-    if (e.pointerType !== "pen") return;
-    e.preventDefault();
-
-    const canvas = canvasRef.current!;
-    canvas.setPointerCapture(e.pointerId);
-    isDrawingRef.current = true;
-    curRef.current = [getLocalPoint(e.nativeEvent, canvas)];
-    requestRedraw();
-  };
-
-  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (disabled) return;
-    if (!isDrawingRef.current) return;
-    if (e.pointerType !== "pen") return;
-    e.preventDefault();
-
-    const canvas = canvasRef.current!;
-    const evs = e.nativeEvent.getCoalescedEvents?.() || [e.nativeEvent];
-    evs.forEach((ev: PointerEvent) => {
-      curRef.current!.push(getLocalPoint(ev, canvas));
-    });
-    requestRedraw();
-  };
-
-  const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (disabled) return;
-    if (e.pointerType !== "pen") return;
-    e.preventDefault();
-
-    const canvas = canvasRef.current!;
-    try {
-      canvas.releasePointerCapture(e.pointerId);
-    } catch {
-      // ignore
-    }
-
-    isDrawingRef.current = false;
-    if (curRef.current && curRef.current.length > 1) {
-      strokesRef.current.push(curRef.current);
-    }
-    curRef.current = null;
-    requestRedraw();
-    exportDataUrl();
-  };
-
-  return (
-    <div
-      style={{
-        border: "1px solid #ddd",
-        borderRadius: 8,
-        background: "#fff",
-        padding: 6,
-        position: "relative",
-        touchAction: "pan-y",
-        userSelect: "none",
-        WebkitUserSelect: "none",
-      }}
-    >
-      <canvas
-        ref={canvasRef}
-        style={{
-          width: "100%",
-          height,
-          display: "block",
-          background: "#fff",
-          borderRadius: 6,
-          touchAction: "none",
-        }}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-      />
-      <button
-        style={{
-          position: "absolute",
-          right: 8,
-          bottom: 8,
-          fontSize: 12,
-          padding: "4px 8px",
-        }}
-        onClick={clear}
-        disabled={disabled}
-      >
-        クリア
-      </button>
-    </div>
-  );
-}
-
-/* ================================
    JWT デコード
 ================================ */
 const decodeJwtPayload = (jwt: string) => {
@@ -421,7 +205,7 @@ const decodeJwtPayload = (jwt: string) => {
 ================================ */
 export default function App() {
   /* ------------------------------
-     端末向き/背景（iPad文字バグ対策でフォント/色を明示）
+     端末向き/背景
   ------------------------------ */
   const [isPortrait, setIsPortrait] = useState(
     window.innerHeight >= window.innerWidth
@@ -454,123 +238,7 @@ export default function App() {
   };
 
   /* ------------------------------
-     ログイン
-  ------------------------------ */
-  const [user, setUser] = useState<User | null>(null);
-  const [loginReady, setLoginReady] = useState(false);
-  const googleBtnRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const id = "google-gsi";
-    if (document.getElementById(id)) {
-      setLoginReady(true);
-      return;
-    }
-    const script = document.createElement("script");
-    script.id = id;
-    script.src = "https://accounts.google.com/gsi/client";
-    script.async = true;
-    script.defer = true;
-    script.onload = () => setLoginReady(true);
-    document.body.appendChild(script);
-  }, []);
-
-  /* ------------------------------
-     設定（ローカル + サーバ同期）
-  ------------------------------ */
-  const [settings, setSettings] = useState<Settings>(() => {
-    const s = localStorage.getItem("settings_json");
-    return s ? (JSON.parse(s) as Settings) : DEFAULT_SETTINGS;
-  });
-  const settingsSyncReadyRef = useRef(false);
-
-  useEffect(() => {
-    localStorage.setItem("settings_json", JSON.stringify(settings));
-  }, [settings]);
-
-  // login時にサーバの settings_json を読み込む
-  const loadSettingsFromServer = async (userId: string) => {
-    try {
-      const r = await apiGet<{ ok: boolean; settings: any }>(
-        "getUserSettings",
-        { userId }
-      );
-      if (r.ok && r.settings) {
-        const merged = { ...DEFAULT_SETTINGS, ...r.settings };
-        setSettings(merged);
-        localStorage.setItem("settings_json", JSON.stringify(merged));
-      }
-    } catch (e) {
-      console.warn("getUserSettings failed", e);
-    } finally {
-      settingsSyncReadyRef.current = true;
-    }
-  };
-
-  // settings変更時にサーバへ保存（デバウンス）
-  useEffect(() => {
-    if (!user) return;
-    if (!settingsSyncReadyRef.current) return;
-
-    const t = setTimeout(() => {
-      apiPost("saveUserSettings", {
-        userId: user.user_id,
-        settings,
-      }).catch((e) => console.warn("saveUserSettings failed", e));
-    }, 500);
-
-    return () => clearTimeout(t);
-  }, [settings, user]);
-
-  useEffect(() => {
-    if (!loginReady || user) return;
-    if (!window.google?.accounts?.id || !googleBtnRef.current) return;
-
-    window.google.accounts.id.initialize({
-      client_id: CLIENT_ID,
-      callback: async (res: any) => {
-        try {
-          const payload = decodeJwtPayload(res.credential);
-          const userId = payload.sub;
-          const email = payload.email || "";
-          const displayName =
-            payload.name || payload.given_name || "user";
-
-          const out = await apiPost<{ ok: boolean }>("upsertUser", {
-            userId,
-            googleSub: payload.sub,
-            email,
-            displayName,
-          });
-          if (!out.ok) throw new Error("upsertUser failed");
-
-          const newUser: User = {
-            user_id: userId,
-            display_name: displayName,
-            weekly_correct_total: 0,
-            email,
-          };
-          setUser(newUser);
-
-          // ★設定をサーバから復元
-          await loadSettingsFromServer(userId);
-        } catch (e) {
-          console.error("google login failed", e);
-        }
-      },
-    });
-
-    window.google.accounts.id.renderButton(googleBtnRef.current, {
-      theme: "outline",
-      size: "large",
-      type: "standard",
-      text: "signin_with",
-      shape: "pill",
-    });
-  }, [loginReady, user]);
-
-  /* ------------------------------
-     単語データ読み込み（subCategory正規化）
+     単語データ読み込み
   ------------------------------ */
   const [books, setBooks] = useState<Book[]>([]);
   const [loadingWords, setLoadingWords] = useState(false);
@@ -601,7 +269,6 @@ export default function App() {
           throw new Error("words_gold.json format mismatch");
         }
 
-        // ★ subCategory 正規化（昔動いてた方式に合わせる）
         loaded.forEach((b) => {
           Object.values(b.decks).forEach((d) => {
             d.items = d.items.map((it: any) => {
@@ -615,11 +282,7 @@ export default function App() {
                   );
                   return tag ? tag.replace("sub:", "") : undefined;
                 })();
-
-              return {
-                ...it,
-                subCategory: sc,
-              } as WordItem;
+              return { ...it, subCategory: sc } as WordItem;
             });
           });
         });
@@ -636,10 +299,21 @@ export default function App() {
   }, []);
 
   /* ------------------------------
-     Book/Set選択
+     Book/Set選択（ログインより先に宣言）
   ------------------------------ */
   const [selectedBookId, setSelectedBookId] = useState<string>("");
   const [selectedSetId, setSelectedSetId] = useState<string>("core");
+
+  // 最新値をGoogleログインcallbackで使うためrefに同期
+  const selectedBookIdRef = useRef<string>("");
+  const selectedSetIdRef = useRef<string>("core");
+  useEffect(() => {
+    selectedBookIdRef.current = selectedBookId;
+  }, [selectedBookId]);
+  useEffect(() => {
+    selectedSetIdRef.current = selectedSetId;
+  }, [selectedSetId]);
+
   useEffect(() => {
     if (books.length && !selectedBookId) {
       setSelectedBookId(books[0].bookId);
@@ -658,6 +332,152 @@ export default function App() {
   );
   const allItems = selectedDeck?.items ?? [];
 
+  /* ------------------------------
+     ログイン / ブート
+  ------------------------------ */
+  const [user, setUser] = useState<User | null>(null);
+  const [loginReady, setLoginReady] = useState(false);
+  const googleBtnRef = useRef<HTMLDivElement | null>(null);
+  const [booting, setBooting] = useState(false);
+
+  useEffect(() => {
+    const id = "google-gsi";
+    if (document.getElementById(id)) {
+      setLoginReady(true);
+      return;
+    }
+    const script = document.createElement("script");
+    script.id = id;
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.onload = () => setLoginReady(true);
+    document.body.appendChild(script);
+  }, []);
+
+  /* ------------------------------
+     設定（ローカル保存）
+  ------------------------------ */
+  const [settings, setSettings] = useState<Settings>(() => {
+    const s = localStorage.getItem("settings_json");
+    return s ? (JSON.parse(s) as Settings) : DEFAULT_SETTINGS;
+  });
+
+  useEffect(() => {
+    localStorage.setItem("settings_json", JSON.stringify(settings));
+  }, [settings]);
+
+  /* ------------------------------
+     MyPageデータ
+  ------------------------------ */
+  const [wrongItems, setWrongItems] = useState<WrongItem[]>([]);
+  const [overview, setOverview] = useState<UserOverview | null>(null);
+
+  const prefetchUserData = async (u: User, bookId: string, deckId: string) => {
+    const [o, w] = await Promise.all([
+      apiGet<{ ok: boolean; user: UserOverview }>("getUserOverview", {
+        userId: u.user_id,
+      }),
+      apiGet<{ ok: boolean; items: WrongItem[] }>("getWrongItems", {
+        userId: u.user_id,
+        bookId,
+        deck: deckId,
+      }),
+    ]);
+    if (o.ok) setOverview(o.user);
+    if (w.ok) setWrongItems(w.items);
+  };
+
+  const loadSettingsFromServer = async (userId: string) => {
+    try {
+      const r = await apiGet<{ ok: boolean; settings: any }>(
+        "getUserSettings",
+        { userId }
+      );
+      if (r.ok && r.settings) {
+        const merged = { ...DEFAULT_SETTINGS, ...r.settings };
+        setSettings(merged);
+        localStorage.setItem("settings_json", JSON.stringify(merged));
+      }
+    } catch (e) {
+      console.warn("getUserSettings failed", e);
+    }
+  };
+
+  // ★ここを修正：
+  // 依存にselectedBookId/selectedSetIdを入れず、refから最新値を読む
+  useEffect(() => {
+    if (!loginReady || user) return;
+    if (!window.google?.accounts?.id || !googleBtnRef.current) return;
+
+    window.google.accounts.id.initialize({
+      client_id: CLIENT_ID,
+      callback: async (res: any) => {
+        setBooting(true);
+        try {
+          const payload = decodeJwtPayload(res.credential);
+          const userId = payload.sub;
+          const email = payload.email || "";
+          const displayName =
+            payload.name || payload.given_name || "user";
+
+          const out = await apiPost<{ ok: boolean }>("upsertUser", {
+            userId,
+            googleSub: payload.sub,
+            email,
+            displayName,
+          });
+          if (!out.ok) throw new Error("upsertUser failed");
+
+          const newUser: User = {
+            user_id: userId,
+            display_name: displayName,
+            weekly_correct_total: 0,
+            email,
+          };
+          setUser(newUser);
+
+          // ①設定復元
+          await loadSettingsFromServer(userId);
+
+          // ②最新の選択をrefから取得
+          const bid = selectedBookIdRef.current || "";
+          const sid = selectedSetIdRef.current || "core";
+          await prefetchUserData(newUser, bid, sid);
+        } catch (e) {
+          console.error("google login failed", e);
+          setUser(null);
+        } finally {
+          setBooting(false);
+        }
+      },
+    });
+
+    window.google.accounts.id.renderButton(googleBtnRef.current, {
+      theme: "outline",
+      size: "large",
+      type: "standard",
+      text: "signin_with",
+      shape: "pill",
+    });
+  }, [loginReady, user]);
+
+  /* ------------------------------
+     deckが変わったら苦手単語も更新
+  ------------------------------ */
+  useEffect(() => {
+    if (!user || !selectedBookId || !selectedSetId) return;
+    apiGet<{ ok: boolean; items: WrongItem[] }>("getWrongItems", {
+      userId: user.user_id,
+      bookId: selectedBookId,
+      deck: selectedSetId,
+    })
+      .then((w) => {
+        if (w.ok) setWrongItems(w.items);
+      })
+      .catch(() => {});
+  }, [user, selectedBookId, selectedSetId]);
+
   const polysemyCount = useMemo(() => {
     const m = new Map<string, number>();
     allItems.forEach((it) =>
@@ -674,6 +494,68 @@ export default function App() {
     return ["all", ...Array.from(s)];
   }, [allItems]);
 
+  const weakItemIds = useMemo(
+    () => new Set(wrongItems.map((w) => w.item_id)),
+    [wrongItems]
+  );
+
+  /* ------------------------------
+     音声（iOS対策）
+  ------------------------------ */
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const primedRef = useRef(false);
+
+  useEffect(() => {
+    const load = () => {
+      const v = window.speechSynthesis.getVoices();
+      if (v && v.length) setVoices(v);
+    };
+    load();
+    window.speechSynthesis.onvoiceschanged = load;
+    return () => {
+      window.speechSynthesis.onvoiceschanged = null;
+    };
+  }, []);
+
+  const primeSpeech = () => {
+    if (primedRef.current) return;
+    primedRef.current = true;
+    window.speechSynthesis.getVoices();
+  };
+
+  const speak = (
+    text: string,
+    lang: "en-US" | "ja-JP" = "en-US",
+    rate?: number
+  ) => {
+    if (!text) return;
+    primeSpeech();
+    try {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = lang;
+      u.rate = rate ?? settings.driveRate;
+
+      const candidates = voices.filter((v) =>
+        v.lang.startsWith(lang.split("-")[0])
+      );
+      if (candidates.length) u.voice = candidates[0];
+
+      window.speechSynthesis.speak(u);
+
+      if (!voices.length) {
+        setTimeout(() => {
+          if (!window.speechSynthesis.speaking) {
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(u);
+          }
+        }, 120);
+      }
+    } catch (e) {
+      console.error("speech", e);
+    }
+  };
+
   /* ------------------------------
      画面状態
   ------------------------------ */
@@ -682,46 +564,43 @@ export default function App() {
   const [showMyPage, setShowMyPage] = useState(false);
 
   /* ------------------------------
-     MyPage（JSONP GET復活で動く）
+     設定モーダル（保存ボタン方式）
   ------------------------------ */
-  const [wrongItems, setWrongItems] = useState<WrongItem[]>([]);
-  const [overview, setOverview] = useState<UserOverview | null>(null);
-  const [loadingMyPage, setLoadingMyPage] = useState(false);
+  const [draftSettings, setDraftSettings] = useState<Settings>(settings);
+  useEffect(() => {
+    if (showSettings) setDraftSettings(settings);
+  }, [showSettings, settings]);
 
-  const weakItemIds = useMemo(
-    () => new Set(wrongItems.map((w) => w.item_id)),
-    [wrongItems]
-  );
+  const saveSettings = async () => {
+    setSettings(draftSettings);
+    localStorage.setItem("settings_json", JSON.stringify(draftSettings));
+    if (user) {
+      await apiPost("saveUserSettings", {
+        userId: user.user_id,
+        settings: draftSettings,
+      }).catch(() => {});
+    }
+    alert("設定を保存しました！");
+    setShowSettings(false);
+  };
 
+  /* ------------------------------
+     MyPage開閉 + 表示名変更
+  ------------------------------ */
   const openMyPage = async () => {
     if (!user) return;
     setShowMyPage(true);
-    setLoadingMyPage(true);
     try {
       const o = await apiGet<{ ok: boolean; user: UserOverview }>(
         "getUserOverview",
         { userId: user.user_id }
       );
       if (o.ok) setOverview(o.user);
-
-      const w = await apiGet<{ ok: boolean; items: WrongItem[] }>(
-        "getWrongItems",
-        {
-          userId: user.user_id,
-          bookId: selectedBookId,
-          deck: selectedSetId,
-        }
-      );
-      if (w.ok) setWrongItems(w.items);
-    } catch (e) {
-      console.error("openMyPage error", e);
-    } finally {
-      setLoadingMyPage(false);
-    }
+    } catch {}
   };
 
   const updateDisplayName = async (name: string) => {
-    if (!user) return;
+    if (!user) return false;
     try {
       const out = await apiPost<{ ok: boolean }>("updateDisplayName", {
         userId: user.user_id,
@@ -730,10 +609,12 @@ export default function App() {
       if (out.ok) {
         setUser({ ...user, display_name: name });
         setOverview((p) => (p ? { ...p, display_name: name } : p));
+        alert("表示名を保存しました！");
+        setShowMyPage(false);
+        return true;
       }
-    } catch (e) {
-      console.error(e);
-    }
+    } catch {}
+    return false;
   };
 
   /* ------------------------------
@@ -762,14 +643,12 @@ export default function App() {
 
   const [questions, setQuestions] = useState<WordItem[]>([]);
   const [answersText, setAnswersText] = useState<Record<number, string>>({});
-  const [answersInk, setAnswersInk] = useState<Record<number, string>>({});
   const [results, setResults] = useState<Record<number, boolean>>({});
 
   const testTopRef = useRef<HTMLDivElement | null>(null);
 
   const buildTestList = () => {
     let list = [...allItems];
-
     if (mistakeOnly) list = list.filter((it) => weakItemIds.has(it.id));
 
     if (isCoreSelected) {
@@ -801,7 +680,6 @@ export default function App() {
   const startTest = () => {
     setQuestions(buildTestList());
     setAnswersText({});
-    setAnswersInk({});
     setResults({});
     setPageIndex(0);
     setGrading(false);
@@ -856,7 +734,6 @@ export default function App() {
     } else {
       setTestStarted(false);
       setGrading(false);
-      if (user) openMyPage();
     }
   };
 
@@ -867,7 +744,7 @@ export default function App() {
   };
 
   /* ------------------------------
-     単語カード設定（UI復活）
+     単語カード設定
   ------------------------------ */
   const [cardsStarted, setCardsStarted] = useState(false);
   const [cardMode, setCardMode] = useState<"level" | "number">("level");
@@ -885,10 +762,10 @@ export default function App() {
   const [cardIndex, setCardIndex] = useState(0);
   const [cardSide, setCardSide] = useState<"front" | "back">("front");
   const cardFs = useSimpleFullscreen<HTMLDivElement>();
+  const [cardPseudoFs, setCardPseudoFs] = useState(false);
 
   const buildCardsList = () => {
     let list = [...allItems];
-
     if (cardMistakeOnly) list = list.filter((it) => weakItemIds.has(it.id));
 
     if (isCoreSelected) {
@@ -928,28 +805,14 @@ export default function App() {
   const currentCard = cardsList[cardIndex];
 
   /* ------------------------------
-     読み上げ
-  ------------------------------ */
-  const speak = (text: string, lang: "en-US" | "ja-JP" = "en-US") => {
-    if (!text) return;
-    try {
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = lang;
-      u.rate = settings.driveRate;
-      window.speechSynthesis.speak(u);
-    } catch (e) {
-      console.error("speech", e);
-    }
-  };
-
-  /* ------------------------------
      ドライブモード
   ------------------------------ */
   const driveFs = useSimpleFullscreen<HTMLDivElement>();
   const [driveOpen, setDriveOpen] = useState(false);
   const [drivePlaying, setDrivePlaying] = useState(false);
   const [driveFieldIndex, setDriveFieldIndex] = useState(0);
+
+  const [driveRateLocal, setDriveRateLocal] = useState(settings.driveRate);
 
   const driveFields = settings.driveOrder;
 
@@ -972,7 +835,8 @@ export default function App() {
       if (txt) {
         speak(
           txt,
-          field === "english" || field === "example_en" ? "en-US" : "ja-JP"
+          field === "english" || field === "example_en" ? "en-US" : "ja-JP",
+          driveRateLocal
         );
       }
 
@@ -1010,13 +874,14 @@ export default function App() {
     cardsList.length,
     driveFields,
     settings.driveDelayMs,
-    settings.driveRate,
+    driveRateLocal,
   ]);
 
   const openDrive = () => {
     setDriveOpen(true);
     setDriveFieldIndex(0);
     setDrivePlaying(false);
+    setDriveRateLocal(settings.driveRate);
   };
 
   /* ------------------------------
@@ -1051,6 +916,31 @@ export default function App() {
   return (
     <div style={shellStyle}>
       <div style={containerStyle}>
+        {/* ブート画面 */}
+        {booting && (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.35)",
+              display: "grid",
+              placeItems: "center",
+              zIndex: 99999,
+            }}
+          >
+            <div
+              style={{
+                background: "#fff",
+                padding: 20,
+                borderRadius: 12,
+                fontWeight: 800,
+              }}
+            >
+              データ読み込み中...
+            </div>
+          </div>
+        )}
+
         {/* ヘッダー */}
         <header
           style={{
@@ -1129,9 +1019,7 @@ export default function App() {
             </div>
           )}
 
-          {/* ==========================
-              テストタブ
-          ========================== */}
+          {/* ===== テストタブ ===== */}
           {!loadingWords && activeTab === "test" && (
             <>
               {!testStarted && (
@@ -1323,8 +1211,22 @@ export default function App() {
                         問題 {pageIndex * pageSize + idx + 1}
                       </div>
 
-                      <div style={{ fontSize: 20, fontWeight: 800 }}>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          fontSize: 20,
+                          fontWeight: 800,
+                        }}
+                      >
                         {q.english}
+                        <button
+                          onClick={() => speak(q.english, "en-US")}
+                          style={{ fontSize: 14 }}
+                        >
+                          🔊
+                        </button>
                       </div>
 
                       {showExampleForItem(q) && q.example_en && (
@@ -1352,17 +1254,7 @@ export default function App() {
 
                         {settings.inputMethod !== "keyboard" && (
                           <div style={{ marginTop: 6 }}>
-                            <HandwriteBox
-                              height={110}
-                              valueDataUrl={answersInk[q.id]}
-                              onChangeDataUrl={(d) =>
-                                setAnswersInk({
-                                  ...answersInk,
-                                  [q.id]: d,
-                                })
-                              }
-                              disabled={grading}
-                            />
+                            <HandwritingCanvas height={110} />
                           </div>
                         )}
                       </div>
@@ -1472,9 +1364,7 @@ export default function App() {
             </>
           )}
 
-          {/* ==========================
-              単語カードタブ
-          ========================== */}
+          {/* ===== 単語カードタブ ===== */}
           {!loadingWords && activeTab === "cards" && (
             <>
               {!cardsStarted && (
@@ -1623,7 +1513,21 @@ export default function App() {
               )}
 
               {cardsStarted && currentCard && (
-                <section ref={cardFs.ref}>
+                <section
+                  ref={cardFs.ref}
+                  style={
+                    cardPseudoFs
+                      ? {
+                          position: "fixed",
+                          inset: 0,
+                          background: "#fff",
+                          zIndex: 9999,
+                          padding: 14,
+                          overflow: "auto",
+                        }
+                      : undefined
+                  }
+                >
                   <div
                     style={{
                       display: "flex",
@@ -1636,15 +1540,20 @@ export default function App() {
                       {cardIndex + 1}/{cardsList.length}
                     </div>
                     <div style={{ display: "flex", gap: 6 }}>
-                      {cardFs.supportsFs && (
-                        <button
-                          onClick={() =>
-                            cardFs.isFs ? cardFs.exit() : cardFs.enter()
+                      <button
+                        onClick={() => {
+                          if (cardFs.supportsFs) {
+                            cardFs.isFs ? cardFs.exit() : cardFs.enter();
+                          } else {
+                            setCardPseudoFs((p) => !p);
                           }
-                        >
-                          {cardFs.isFs ? "全画面解除" : "全画面"}
-                        </button>
-                      )}
+                        }}
+                      >
+                        {(cardFs.supportsFs ? cardFs.isFs : cardPseudoFs)
+                          ? "全画面解除"
+                          : "全画面"}
+                      </button>
+
                       <button onClick={openDrive}>🚗 ドライブモード</button>
                     </div>
                   </div>
@@ -1656,10 +1565,16 @@ export default function App() {
                       border: "1px solid #e5e7eb",
                       background: "#fff",
                       textAlign: "center",
-                      minHeight: cardFs.isFs ? "70vh" : 220,
+                      minHeight:
+                        (cardFs.supportsFs && cardFs.isFs) || cardPseudoFs
+                          ? "70vh"
+                          : 220,
                       display: "grid",
                       placeItems: "center",
-                      fontSize: cardFs.isFs ? 52 : 28,
+                      fontSize:
+                        (cardFs.supportsFs && cardFs.isFs) || cardPseudoFs
+                          ? 52
+                          : 28,
                       fontWeight: 800,
                     }}
                     onClick={() =>
@@ -1690,17 +1605,11 @@ export default function App() {
                     </button>
 
                     <div style={{ display: "flex", gap: 6 }}>
-                      <button
-                        onClick={() =>
-                          speak(currentCard.english, "en-US")
-                        }
-                      >
+                      <button onClick={() => speak(currentCard.english, "en-US")}>
                         🔊 英語
                       </button>
                       <button
-                        onClick={() =>
-                          speak(currentCard.japanese, "ja-JP")
-                        }
+                        onClick={() => speak(currentCard.japanese, "ja-JP")}
                       >
                         🔊 日本語
                       </button>
@@ -1730,10 +1639,10 @@ export default function App() {
               <label>
                 1ページの問題数：
                 <select
-                  value={settings.pageSize}
+                  value={draftSettings.pageSize}
                   onChange={(e) =>
-                    setSettings({
-                      ...settings,
+                    setDraftSettings({
+                      ...draftSettings,
                       pageSize: Number(e.target.value) as any,
                     })
                   }
@@ -1749,10 +1658,10 @@ export default function App() {
               <label>
                 出題順：
                 <select
-                  value={settings.randomOrder ? "random" : "seq"}
+                  value={draftSettings.randomOrder ? "random" : "seq"}
                   onChange={(e) =>
-                    setSettings({
-                      ...settings,
+                    setDraftSettings({
+                      ...draftSettings,
                       randomOrder: e.target.value === "random",
                     })
                   }
@@ -1765,10 +1674,10 @@ export default function App() {
               <label>
                 例文の表示：
                 <select
-                  value={settings.showExamplesMode}
+                  value={draftSettings.showExamplesMode}
                   onChange={(e) =>
-                    setSettings({
-                      ...settings,
+                    setDraftSettings({
+                      ...draftSettings,
                       showExamplesMode: e.target.value as any,
                     })
                   }
@@ -1782,10 +1691,10 @@ export default function App() {
               <label>
                 入力方法：
                 <select
-                  value={settings.inputMethod}
+                  value={draftSettings.inputMethod}
                   onChange={(e) =>
-                    setSettings({
-                      ...settings,
+                    setDraftSettings({
+                      ...draftSettings,
                       inputMethod: e.target.value as any,
                     })
                   }
@@ -1797,21 +1706,21 @@ export default function App() {
               </label>
 
               <label>
-                ドライブ速度：
+                ドライブ速度(デフォルト)：
                 <input
                   type="range"
                   min={0.6}
                   max={1.4}
                   step={0.1}
-                  value={settings.driveRate}
+                  value={draftSettings.driveRate}
                   onChange={(e) =>
-                    setSettings({
-                      ...settings,
+                    setDraftSettings({
+                      ...draftSettings,
                       driveRate: Number(e.target.value),
                     })
                   }
                 />
-                {settings.driveRate.toFixed(1)}x
+                {draftSettings.driveRate.toFixed(1)}x
               </label>
 
               <label>
@@ -1821,10 +1730,10 @@ export default function App() {
                   min={200}
                   max={3000}
                   step={100}
-                  value={settings.driveDelayMs}
+                  value={draftSettings.driveDelayMs}
                   onChange={(e) =>
-                    setSettings({
-                      ...settings,
+                    setDraftSettings({
+                      ...draftSettings,
                       driveDelayMs: Number(e.target.value),
                     })
                   }
@@ -1840,10 +1749,10 @@ export default function App() {
                     <label key={f} style={{ display: "block" }}>
                       <input
                         type="checkbox"
-                        checked={settings.driveOrder.includes(f as any)}
+                        checked={draftSettings.driveOrder.includes(f as any)}
                         onChange={(e) => {
                           const on = e.target.checked;
-                          setSettings((s) => {
+                          setDraftSettings((s) => {
                             const cur = s.driveOrder;
                             const nf = f as any;
                             if (on && !cur.includes(nf))
@@ -1865,67 +1774,78 @@ export default function App() {
                   )
                 )}
               </div>
+
+              <button
+                onClick={saveSettings}
+                style={{
+                  marginTop: 6,
+                  padding: "10px 0",
+                  borderRadius: 12,
+                  fontWeight: 800,
+                  background: "#111827",
+                  color: "#fff",
+                }}
+              >
+                保存
+              </button>
             </div>
           </Modal>
         )}
 
         {/* マイページモーダル */}
-        {showMyPage && (
+        {showMyPage && overview && (
           <Modal onClose={() => setShowMyPage(false)} title="👤 マイページ">
-            {loadingMyPage && <div>読み込み中...</div>}
-            {!loadingMyPage && overview && (
-              <div style={{ display: "grid", gap: 10 }}>
-                <div style={{ fontWeight: 700 }}>
-                  今週の正解数：{overview.weekly_correct_total}
-                </div>
-                <div style={{ fontWeight: 700 }}>
-                  累計の正解数：{overview.total_correct}
-                </div>
-
-                <div>
-                  <div style={{ fontWeight: 800, marginBottom: 4 }}>
-                    表示名を変更
-                  </div>
-                  <NameEditor
-                    initial={overview.display_name}
-                    onSave={updateDisplayName}
-                  />
-                </div>
-
-                <div>
-                  <div style={{ fontWeight: 800, marginBottom: 4 }}>
-                    苦手な単語
-                  </div>
-                  {wrongItems.length === 0 && (
-                    <div style={{ fontSize: 14, color: "#555" }}>
-                      まだありません
-                    </div>
-                  )}
-                  {wrongItems.map((w) => {
-                    const it = allItems.find((x) => x.id === w.item_id);
-                    if (!it) return null;
-                    return (
-                      <div
-                        key={w.item_id}
-                        style={{
-                          padding: 8,
-                          border: "1px solid #eee",
-                          borderRadius: 8,
-                          marginBottom: 6,
-                          background: "#fff",
-                        }}
-                      >
-                        <div style={{ fontWeight: 800 }}>{it.english}</div>
-                        <div style={{ color: "#555" }}>{it.japanese}</div>
-                        <div style={{ fontSize: 12, color: "#777" }}>
-                          間違えた回数: {w.wrong_total}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={{ fontWeight: 700 }}>
+                今週の正解数：{overview.weekly_correct_total}
               </div>
-            )}
+              <div style={{ fontWeight: 700 }}>
+                累計の正解数：{overview.total_correct}
+              </div>
+
+              <div>
+                <div style={{ fontWeight: 800, marginBottom: 4 }}>
+                  表示名を変更
+                </div>
+                <NameEditor
+                  initial={overview.display_name}
+                  onSave={updateDisplayName}
+                />
+              </div>
+
+              <div>
+                <div style={{ fontWeight: 800, marginBottom: 4 }}>
+                  苦手な単語
+                </div>
+                {wrongItems.length === 0 && (
+                  <div style={{ fontSize: 14, color: "#555" }}>
+                    まだありません
+                  </div>
+                )}
+                {wrongItems.map((w) => {
+                  const it = allItems.find((x) => x.id === w.item_id);
+                  if (!it) return null;
+                  return (
+                    <div
+                      key={w.item_id}
+                      style={{
+                        padding: 8,
+                        border: "1px solid #eee",
+                        borderRadius: 8,
+                        marginBottom: 6,
+                        background: "#fff",
+                      }}
+                    >
+                      <div style={{ fontWeight: 800 }}>{it.english}</div>
+                      <div style={{ color: "#555" }}>{it.japanese}</div>
+                      <div style={{ fontSize: 12, color: "#777" }}>
+                        間違えた回数: {w.wrong_total}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </Modal>
         )}
 
@@ -1933,11 +1853,10 @@ export default function App() {
         {driveOpen && currentCard && (
           <div
             ref={driveFs.ref}
-            onClick={() => setDriveOpen(false)}
             style={{
               position: "fixed",
               inset: 0,
-              background: "rgba(0,0,0,0.9)",
+              background: "#000",
               display: "grid",
               placeItems: "center",
               zIndex: 99999,
@@ -1946,7 +1865,6 @@ export default function App() {
             }}
           >
             <div
-              onClick={(e) => e.stopPropagation()}
               style={{
                 width: "100%",
                 maxWidth: 900,
@@ -1963,6 +1881,21 @@ export default function App() {
                 }}
               >
                 {getFieldText(currentCard, driveFields[driveFieldIndex])}
+              </div>
+
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                  再生速度：{driveRateLocal.toFixed(1)}x
+                </div>
+                <input
+                  type="range"
+                  min={0.6}
+                  max={1.4}
+                  step={0.1}
+                  value={driveRateLocal}
+                  onChange={(e) => setDriveRateLocal(Number(e.target.value))}
+                  style={{ width: "70%" }}
+                />
               </div>
 
               <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
@@ -1994,6 +1927,7 @@ export default function App() {
                 >
                   ⏭ 次
                 </button>
+
                 {driveFs.supportsFs && (
                   <button
                     onClick={() =>
@@ -2004,6 +1938,7 @@ export default function App() {
                     {driveFs.isFs ? "全画面解除" : "全画面"}
                   </button>
                 )}
+
                 <button
                   onClick={() => setDriveOpen(false)}
                   style={{ padding: "8px 14px", fontWeight: 800 }}
@@ -2076,9 +2011,11 @@ function NameEditor({
   onSave,
 }: {
   initial: string;
-  onSave: (name: string) => void;
+  onSave: (name: string) => Promise<boolean> | boolean;
 }) {
   const [v, setV] = useState(initial);
+  const [saving, setSaving] = useState(false);
+
   return (
     <div style={{ display: "flex", gap: 6 }}>
       <input
@@ -2086,7 +2023,18 @@ function NameEditor({
         onChange={(e) => setV(e.target.value)}
         style={{ flex: 1, padding: 8, fontSize: 16 }}
       />
-      <button onClick={() => onSave(v)} style={{ fontWeight: 800 }}>
+      <button
+        disabled={saving}
+        onClick={async () => {
+          setSaving(true);
+          try {
+            await onSave(v);
+          } finally {
+            setSaving(false);
+          }
+        }}
+        style={{ fontWeight: 800 }}
+      >
         保存
       </button>
     </div>

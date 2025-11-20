@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef } from "react";
 
 type HandwritingCanvasProps = {
   height?: number;
@@ -11,15 +11,16 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
 
   const isDrawingRef = useRef(false);
-  const lastPointRef = useRef<{ x: number; y: number } | null>(null);
+  const lastPointRef = useRef<{ x: number; y: number; p: number } | null>(null);
 
-  const isTouchDeviceRef = useRef(false);
+  // 描画中の手のタッチ(指)を全体でブロックするためのフラグ
+  const blockPalmRef = useRef(false);
 
-  // 最初の一回だけコンテキストをセットアップ（スクロール時に再初期化しない）
+  // 一度だけセットアップ
   const setupContext = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     ctxRef.current = ctx;
@@ -30,211 +31,174 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
     canvas.width = rect.width * dpr;
     canvas.height = rect.height * dpr;
 
+    // dprに追従
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = '#000';
+
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+
+    // ★少し太く
+    ctx.lineWidth = 4.0;
+    ctx.strokeStyle = "#000";
   };
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
-    isTouchDeviceRef.current =
-      'ontouchstart' in window || navigator.maxTouchPoints > 0;
-
-    // マウント時に一度だけセットアップ
     setupContext();
 
     const ctx = ctxRef.current;
     if (!ctx) return;
 
-    // 共通：ストローク処理
-    const beginStroke = (x: number, y: number) => {
-      isDrawingRef.current = true;
-      lastPointRef.current = { x, y };
-      ctx.beginPath();
-      ctx.moveTo(x, y);
+    const getLocal = (e: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      return {
+        x: (e.clientX - rect.left) * dpr,
+        y: (e.clientY - rect.top) * dpr,
+        p: e.pressure || 0.5,
+      };
     };
 
-    const extendStroke = (x: number, y: number) => {
+    const beginStroke = (x: number, y: number, p: number) => {
+      isDrawingRef.current = true;
+      lastPointRef.current = { x, y, p };
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+
+      // 描画中は選択させない
+      blockPalmRef.current = true;
+      document.body.style.userSelect = "none";
+      (document.body.style as any).webkitUserSelect = "none";
+      (document.body.style as any).webkitTouchCallout = "none";
+    };
+
+    const extendStroke = (x: number, y: number, p: number) => {
       if (!isDrawingRef.current) return;
       const last = lastPointRef.current;
       if (!last) {
-        lastPointRef.current = { x, y };
+        lastPointRef.current = { x, y, p };
         return;
       }
+
+      // ★pressureで太さ微調整（太め寄り）
+      const width = 3.6 + 3.2 * p;
+      ctx.lineWidth = width;
+
       ctx.beginPath();
       ctx.moveTo(last.x, last.y);
       ctx.lineTo(x, y);
       ctx.stroke();
-      lastPointRef.current = { x, y };
+
+      lastPointRef.current = { x, y, p };
     };
 
     const endStroke = () => {
       isDrawingRef.current = false;
       lastPointRef.current = null;
+
+      blockPalmRef.current = false;
+      document.body.style.userSelect = "";
+      (document.body.style as any).webkitUserSelect = "";
+      (document.body.style as any).webkitTouchCallout = "";
     };
 
-    // ---- touch（iPad 等）：ペンだけ描画、指はスクロール専用 --------------------
-    const handleTouchStart = (e: TouchEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      const touchesList = e.touches.length ? e.touches : e.changedTouches;
-      if (!touchesList.length) return;
-
-      const touchesArray = Array.from(touchesList);
-      const supportsTouchType = 'touchType' in touchesArray[0];
-
-      let stylusTouch: Touch | null = null;
-
-      if (supportsTouchType) {
-        // touchType が取れる環境（iPad Safari 等）では stylus のみ描画
-        for (const t of touchesArray) {
-          const tt = t as any;
-          if (tt.touchType === 'stylus') {
-            stylusTouch = t;
-            break;
-          }
-        }
-        if (!stylusTouch) {
-          // ペンが含まれていない → 指で触っているだけ → 描画しない・スクロールさせる
-          return;
-        }
-      } else {
-        // 古いブラウザ等：とりあえず最初のタッチを使う（互換用）
-        stylusTouch = touchesArray[0];
-      }
-
-      // ここで初めて既定動作を止める（ペンのときだけ）
-      e.preventDefault();
-
-      const x = stylusTouch.clientX - rect.left;
-      const y = stylusTouch.clientY - rect.top;
-      beginStroke(x, y);
-    };
-
-    const handleTouchMove = (e: TouchEvent) => {
-      if (!isDrawingRef.current) return;
-
-      const rect = canvas.getBoundingClientRect();
-      const touchesList = e.touches.length ? e.touches : e.changedTouches;
-      if (!touchesList.length) return;
-
-      const touchesArray = Array.from(touchesList);
-      const supportsTouchType = 'touchType' in touchesArray[0];
-
-      let stylusTouch: Touch | null = null;
-
-      if (supportsTouchType) {
-        for (const t of touchesArray) {
-          const tt = t as any;
-          if (tt.touchType === 'stylus') {
-            stylusTouch = t;
-            break;
-          }
-        }
-        if (!stylusTouch) {
-          // ペンがない状態の move は無視（finger で動いているだけ）
-          return;
-        }
-      } else {
-        stylusTouch = touchesArray[0];
-      }
-
-      e.preventDefault();
-
-      const x = stylusTouch.clientX - rect.left;
-      const y = stylusTouch.clientY - rect.top;
-      extendStroke(x, y);
-    };
-
-    const handleTouchEnd = (e: TouchEvent) => {
-      const touchesArray = Array.from(e.changedTouches);
-      const supportsTouchType =
-        touchesArray[0] && 'touchType' in touchesArray[0];
-
-      let hasStylusEnd = false;
-      if (supportsTouchType) {
-        for (const t of touchesArray) {
-          const tt = t as any;
-          if (tt.touchType === 'stylus') {
-            hasStylusEnd = true;
-            break;
-          }
-        }
-      } else {
-        // touchType がない環境ではとりあえず end で終わりにする
-        hasStylusEnd = true;
-      }
-
-      if (!hasStylusEnd) {
-        // 指だけ離れた場合はストローク終了扱いにしない
+    // ---- Pointer Events（iPad / PC共通・ペンのみ描画） -----------------
+    const handlePointerDown = (e: PointerEvent) => {
+      if (e.pointerType !== "pen" && e.pointerType !== "mouse") {
+        // 指タッチは無視（スクロール専用）
         return;
       }
+      if (e.pointerType === "mouse" && e.buttons !== 1) return;
 
       e.preventDefault();
+      e.stopPropagation();
+
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch {}
+
+      const { x, y, p } = getLocal(e);
+      beginStroke(x, y, p);
+    };
+
+    const handlePointerMove = (e: PointerEvent) => {
+      if (!isDrawingRef.current) return;
+      if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const evs = e.getCoalescedEvents?.() || [e];
+      evs.forEach((ev) => {
+        const { x, y, p } = getLocal(ev as PointerEvent);
+        extendStroke(x, y, p);
+      });
+    };
+
+    const handlePointerUp = (e: PointerEvent) => {
+      if (!isDrawingRef.current) return;
+      if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      try {
+        canvas.releasePointerCapture(e.pointerId);
+      } catch {}
+
       endStroke();
     };
 
-    // ---- mouse（PC）：今までどおりマウスで描画 -------------------------------
-    const handleMouseDown = (e: MouseEvent) => {
-      if (e.button !== 0) return;
-      e.preventDefault();
+    // ---- palm rejection（描画中の指タップを全体でブロック） -------------
+    const blockPalm = (e: TouchEvent) => {
+      if (!blockPalmRef.current) return;
 
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      beginStroke(x, y);
+      const touches = Array.from(e.touches.length ? e.touches : e.changedTouches);
+      const supportsTouchType = touches[0] && "touchType" in (touches[0] as any);
+
+      if (supportsTouchType) {
+        const hasStylus = touches.some(
+          (t) => (t as any).touchType === "stylus"
+        );
+        if (!hasStylus) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      } else {
+        // touchTypeが無い環境は、描画中の指イベントは全部ブロック
+        e.preventDefault();
+        e.stopPropagation();
+      }
     };
 
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!isDrawingRef.current) return;
-      e.preventDefault();
+    canvas.addEventListener("pointerdown", handlePointerDown, { passive: false });
+    canvas.addEventListener("pointermove", handlePointerMove, { passive: false });
+    canvas.addEventListener("pointerup", handlePointerUp, { passive: false });
+    canvas.addEventListener("pointercancel", handlePointerUp, { passive: false });
 
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      extendStroke(x, y);
-    };
-
-    const handleMouseUp = (e: MouseEvent) => {
-      if (!isDrawingRef.current) return;
-      e.preventDefault();
-      endStroke();
-    };
-
-    // ---- イベント登録 --------------------------------------------------------
-    if (isTouchDeviceRef.current) {
-      canvas.addEventListener('touchstart', handleTouchStart, {
-        passive: false,
-      });
-      canvas.addEventListener('touchmove', handleTouchMove, {
-        passive: false,
-      });
-      canvas.addEventListener('touchend', handleTouchEnd, {
-        passive: false,
-      });
-      canvas.addEventListener('touchcancel', handleTouchEnd, {
-        passive: false,
-      });
-    } else {
-      canvas.addEventListener('mousedown', handleMouseDown);
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mouseup', handleMouseUp);
-    }
+    document.addEventListener("touchstart", blockPalm, {
+      passive: false,
+      capture: true,
+    });
+    document.addEventListener("touchmove", blockPalm, {
+      passive: false,
+      capture: true,
+    });
+    document.addEventListener("touchend", blockPalm, {
+      passive: false,
+      capture: true,
+    });
 
     return () => {
-      if (isTouchDeviceRef.current) {
-        canvas.removeEventListener('touchstart', handleTouchStart);
-        canvas.removeEventListener('touchmove', handleTouchMove);
-        canvas.removeEventListener('touchend', handleTouchEnd);
-        canvas.removeEventListener('touchcancel', handleTouchEnd);
-      } else {
-        canvas.removeEventListener('mousedown', handleMouseDown);
-        window.removeEventListener('mousemove', handleMouseMove);
-        window.removeEventListener('mouseup', handleMouseUp);
-      }
+      canvas.removeEventListener("pointerdown", handlePointerDown);
+      canvas.removeEventListener("pointermove", handlePointerMove);
+      canvas.removeEventListener("pointerup", handlePointerUp);
+      canvas.removeEventListener("pointercancel", handlePointerUp);
+
+      document.removeEventListener("touchstart", blockPalm, true as any);
+      document.removeEventListener("touchmove", blockPalm, true as any);
+      document.removeEventListener("touchend", blockPalm, true as any);
     };
   }, []);
 
@@ -248,29 +212,32 @@ const HandwritingCanvas: React.FC<HandwritingCanvasProps> = ({
   return (
     <div
       style={{
-        // 指でのスクロールは許可したいので touchAction は付けない
-        userSelect: 'none',
-        WebkitUserSelect: 'none',
+        userSelect: "none",
+        WebkitUserSelect: "none",
+        // 指スクロールは許可（縦）
+        touchAction: "pan-y",
       }}
     >
       <canvas
         ref={canvasRef}
         style={{
-          width: '100%',
+          width: "100%",
           height: `${height}px`,
-          display: 'block',
-          userSelect: 'none',
-          WebkitUserSelect: 'none',
-          background: '#fff',
-          border: '1px solid #ccc',
-          borderRadius: 4,
+          display: "block",
+          userSelect: "none",
+          WebkitUserSelect: "none",
+          background: "#fff",
+          border: "1px solid #ccc",
+          borderRadius: 6,
+          // 指スクロールOK、描画時はpreventDefaultで止める
+          touchAction: "pan-y",
         }}
       />
-      <div style={{ textAlign: 'right', marginTop: 4 }}>
+      <div style={{ textAlign: "right", marginTop: 4 }}>
         <button
           type="button"
           onClick={handleClear}
-          style={{ fontSize: '0.8rem' }}
+          style={{ fontSize: "0.8rem" }}
         >
           クリア
         </button>
