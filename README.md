@@ -1,73 +1,131 @@
-# React + TypeScript + Vite
+# vocab-app — 英単語テストアプリ
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+> **ポートフォリオ用途で整備したドキュメントです。**
+> リポジトリ: [https://github.com/hariku0212/vocab-app](https://github.com/hariku0212/vocab-app)
 
-Currently, two official plugins are available:
+---
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+## プロジェクト概要
 
-## React Compiler
+英単語の習得を支援するWebアプリケーションです。
+もともと Excel VBA で構築していた学習ツールを、より高速・拡張性の高い React / TypeScript スタックへ移植・再実装しました。
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+PCブラウザはもちろん、スマートフォンでも快適に利用できるレスポンシブ設計を採用しています。
 
-## Expanding the ESLint configuration
+---
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## 技術スタック
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+| カテゴリ | 技術 |
+|---------|------|
+| フロントエンドフレームワーク | React 18 |
+| 言語 | TypeScript |
+| ビルドツール | Vite |
+| リンター | ESLint |
+| パッケージ管理 | npm |
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+リポジトリ構成の言語比率: TypeScript 96.2% / CSS 2.4% / その他 1.4%
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+---
+
+## 主な機能
+
+- **単語テスト機能**: ランダム出題による英単語の意味確認テスト
+- **進捗管理**: 正解・不正解の記録と習熟度トラッキング
+- **単語リスト管理**: 学習対象の単語セットを登録・編集
+- **レスポンシブUI**: PC・スマートフォン双方に対応したインターフェース
+
+---
+
+## セットアップ手順
+
+### 必要環境
+
+- Node.js 18 以上
+- npm 9 以上
+
+### インストール・起動
+
+```bash
+# リポジトリをクローン
+git clone https://github.com/hariku0212/vocab-app.git
+cd vocab-app
+
+# 依存パッケージをインストール
+npm install
+
+# 開発サーバーを起動（http://localhost:5173）
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### ビルド（本番用）
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run build
 ```
+
+---
+
+## ディレクトリ構成
+
+```
+vocab-app/
+├── public/          # 静的アセット
+├── src/             # ソースコード
+│   ├── components/  # Reactコンポーネント
+│   ├── hooks/       # カスタムフック
+│   ├── types/       # TypeScript型定義
+│   └── main.tsx     # エントリポイント
+├── index.html
+├── package.json
+├── tsconfig.json
+└── vite.config.ts
+```
+
+---
+
+## 開発背景
+
+個別指導塾講師として働いていた際、生徒向けの英単語テストを Excel VBA で自作していました。
+しかしExcelの配布・更新が煩雑で、スマートフォンからの利用もできないという課題がありました。
+
+そこで、Webアプリとして再実装することで以下を実現しました：
+
+- ブラウザさえあればどのデバイスからでもアクセス可能
+- リアルタイムな進捗確認
+- 将来的な機能拡張（音声再生、AI問題生成など）のしやすさ
+
+---
+
+## 技術選定の理由
+
+### React + TypeScript を選んだ理由
+
+- **型安全性**: TypeScriptにより、単語データ・進捗データの構造を型で明示的に管理し、バグを早期発見できる
+- **コンポーネント再利用**: テストUI・単語カードなど再利用性の高いUIをコンポーネント化することで保守性を向上
+- **エコシステムの豊富さ**: 将来的な機能追加（音声API連携、バックエンド連携など）に対応しやすい
+
+### Vite を選んだ理由
+
+- **起動速度**: Create React Appと比較して開発サーバーの起動が大幅に高速
+- **HMR（Hot Module Replacement）**: コード変更が即時ブラウザに反映され、開発効率が高い
+- **軽量なバンドル出力**: 本番ビルドのサイズを最小化できる
+
+---
+
+## スキルアピールポイント
+
+このプロジェクトを通じてアピールしたい技術力：
+
+1. **VBAからモダンWebへの移行経験**: 業務ツールをクラウド化・Web化するリファクタリング能力
+2. **TypeScriptによる堅牢な実装**: 型定義を活用した保守性の高いコード設計
+3. **Viteを使ったモダン開発環境構築**: 最新のフロントエンド開発ツールチェーンの習熟
+4. **実用ツールとしての開発経験**: 実際の教育現場の課題解決を目的としたアプリ開発
+
+---
+
+## 作者
+
+- **GitHub**: [@hariku0212](https://github.com/hariku0212)
+- **バックグラウンド**: 京都大学大学院卒（電気電子工学） / 京セラ株式会社勤務
+- **資格**: 基本情報技術者 / 応用情報技術者
